@@ -425,3 +425,40 @@ if st.button("Check Live Matches"):
 
     st.write("HTTP status:", response.status_code)
     st.json(response.json())
+
+# TheStatsAPI connection test
+st.subheader("⚽ TheStatsAPI Connection Test")
+
+if st.button("Test TheStatsAPI"):
+    import requests
+
+    url = "https://api.thestatsapi.com/api/football/matches"
+
+    headers = {
+        "Authorization": f"Bearer {st.secrets['STATS_API_KEY']}"
+    }
+
+    params = {
+        "status": "scheduled",
+        "per_page": 5
+    }
+
+    try:
+        response = requests.get(
+            url,
+            headers=headers,
+            params=params,
+            timeout=20
+        )
+
+        st.write("HTTP status:", response.status_code)
+
+        if response.ok:
+            st.success("Connection successful!")
+            st.json(response.json())
+        else:
+            st.error("API request failed")
+            st.write(response.text[:1000])
+
+    except requests.RequestException as e:
+        st.error(f"Connection error: {e}")
