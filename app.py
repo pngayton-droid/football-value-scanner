@@ -462,3 +462,39 @@ if st.button("Test TheStatsAPI"):
 
     except requests.RequestException as e:
         st.error(f"Connection error: {e}")
+
+# TheStatsAPI live matches test
+st.subheader("🔴 TheStatsAPI Live Matches")
+
+if st.button("Find Live Matches"):
+    import requests
+
+    url = "https://api.thestatsapi.com/api/football/matches"
+
+    headers = {
+        "Authorization": f"Bearer {st.secrets['STATS_API_KEY']}"
+    }
+
+    params = {
+        "status": "live",
+        "per_page": 20
+    }
+
+    try:
+        response = requests.get(
+            url,
+            headers=headers,
+            params=params,
+            timeout=20
+        )
+
+        st.write("HTTP status:", response.status_code)
+
+        if response.ok:
+            data = response.json()
+            st.json(data)
+        else:
+            st.error(response.text[:1000])
+
+    except requests.RequestException as e:
+        st.error(f"Connection error: {e}")
