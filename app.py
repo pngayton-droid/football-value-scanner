@@ -321,3 +321,88 @@ if st.button("Test Match Statistics"):
 
     except Exception as e:
         st.error(f"Statistics test error: {e}")
+# PITCHAPI SELECTABLE MATCH STATISTICS
+st.divider()
+st.header("⚽ Live Match Statistics")
+
+if st.button("Load Today's Match List"):
+    try:
+        today = datetime.now(
+            ZoneInfo("Europe/London")
+        ).date().isoformat()
+
+        r = requests.get(
+            f"https://api.pitchapi.dev/v1/date/{today}",
+            headers={
+                "X-API-KEY": st.secrets["PITCH_API_KEY"]
+            },
+            params={"status": "all"},
+            timeout=20
+        )
+        r.raise_for_status()
+
+        st.session_state["pitch_matches"] = (
+            r.json().get("data", {}).get("matches", [])
+        )
+
+    except Exception as e:
+        st.error(str(e))
+
+matches = st.session_state.get("pitch_matches", [])
+
+if matches:
+    options = {
+        f"{m.get('home_team', {}).get('name')} v "
+        f"{m.get('away_team', {}).get('name')} "
+        f"({m.get('status')})": m["id"]
+        for m in matches
+    }
+
+    selected = st.selectbox(
+        "Choose a match",
+        list(options.keys())
+    )
+
+    if st.button("Get Selected Match Statistics"):
+        try:
+            match_id = options[selected]
+
+            r = requests.get(
+                f"https://api.pitchapi.dev/v1/matches/{match_id}/stats",
+                headers={
+                    "X-API-KEY": st.secrets["PITCH_API_KEY"]
+                },
+                timeout=20
+            )
+            st.write("HTTP status:", r.status_code)
+
+            if r.ok:
+                data = r.json().get("data", {})
+                st.write(
+                    "Match:",
+                    data.get("home_team", {}).get("name"),
+                    "v",
+                    data.get("away_team", {}).get("name")
+                )
+
+                for period in data.get("periods", []):
+                    st.subheader(period.get("period"))
+
+                    for group in period.get("groups", []):
+                        for item in group.get("items", []):
+                            if item.get("key") in [
+                                "expected_goals",
+                                "total_shots",
+                                "corners",
+                                "BallPossesion"
+                            ]:
+                                st.write(
+                                    f"{item['title']}: "
+                                    f"{item.get('home')} - "
+                                    f"{item.get('away')}"
+                                )
+            else:
+                st.error(r.text[:500])
+
+        except Exception as e:
+            st.error(str(e))
