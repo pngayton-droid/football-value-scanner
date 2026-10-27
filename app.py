@@ -205,3 +205,28 @@ if "API_FOOTBALL_KEY" in st.secrets:
                 st.error(f"Statistics error: {e}")
     else:
         st.info("No fixtures available to select.")
+# PITCHAPI CONNECTION TEST
+st.divider()
+st.header("⚽ PitchAPI Connection Test")
+
+if st.button("Test PitchAPI"):
+    try:
+        response = requests.get(
+            "https://api.pitchapi.dev/v1/leagues/",
+            headers={
+                "X-API-KEY": st.secrets["PITCH_API_KEY"]
+            },
+            timeout=15
+        )
+
+        st.write("HTTP status:", response.status_code)
+
+        if response.status_code == 200:
+            st.success("PitchAPI connection successful!")
+            st.json(response.json())
+        else:
+            st.error("PitchAPI connection failed.")
+            st.write(response.text[:500])
+
+    except Exception as e:
+        st.error(f"Connection error: {e}")
