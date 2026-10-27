@@ -230,3 +230,41 @@ if st.button("Test PitchAPI"):
 
     except Exception as e:
         st.error(f"Connection error: {e}")
+# PITCHAPI TODAY'S MATCHES TEST
+st.divider()
+st.header("⚽ PitchAPI Today's Matches")
+
+if st.button("Fetch Today's Matches"):
+    try:
+        today = datetime.now(
+            ZoneInfo("Europe/London")
+        ).date().isoformat()
+
+        response = requests.get(
+            f"https://api.pitchapi.dev/v1/date/{today}",
+            headers={
+                "X-API-KEY": st.secrets["PITCH_API_KEY"]
+            },
+            params={"status": "all"},
+            timeout=20
+        )
+
+        st.write("HTTP status:", response.status_code)
+
+        if response.ok:
+            matches = response.json().get(
+                "data", {}
+            ).get("matches", [])
+
+            st.success(f"Found {len(matches)} matches")
+
+            for match in matches:
+                home = match.get("home_team", {}).get("name")
+                away = match.get("away_team", {}).get("name")
+                status = match.get("status")
+                st.write(f"{home} v {away} — {status}")
+        else:
+            st.error(response.text[:500])
+
+    except Exception as e:
+        st.error(str(e))
