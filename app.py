@@ -3,6 +3,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+import requests
 st.set_page_config(page_title='Football Value Scanner',layout='wide')
 st.title('Football Value Scanner · Research prototype')
 st.caption('Historical comparison only. No live feeds, executable bets or verified real-time odds. Prices are entered manually.')
@@ -131,41 +132,70 @@ if st.button("Test TheStatsAPI"):
     except requests.RequestException as e:
         st.error(f"Connection error: {e}")
 
-# TheStatsAPI live matches test
-st.subheader("🔴 TheStatsAPI Live Matches")
+# THESTATSAPI LIVE MATCH DASHBOARD
+st.divider()
+st.header("⚽ Live Football Dashboard")
 
-if st.button("Find Live Matches"):
-    import requests
-
-    url = "https://api.thestatsapi.com/api/football/matches"
-
-    headers = {
-        "Authorization": f"Bearer {st.secrets['STATS_API_KEY']}"
-    }
-
-    params = {
-        "status": "live",
-        "per_page": 20
-    }
-
+if st.button("Refresh Live Matches"):
     try:
+        url = "https://api.thestatsapi.com/api/football/matches"
+
+        headers = {
+            "Authorization": f"Bearer {st.secrets['STATS_API_KEY']}"
+        }
+
         response = requests.get(
             url,
             headers=headers,
-            params=params,
+            params={"status": "live", "per_page": 100},
             timeout=20
         )
+        response.raise_for_status()
 
-        st.write("HTTP status:", response.status_code)
+        payload = response.json()
+        matches = payload.get("data", [])
 
-        if response.ok:
-            data = response.json()
-            st.json(data)
+        if not isinstance(matches, list):
+            st.error("Unexpected API response format.")
+        elif not matches:
+            st.info("No live matches found.")
         else:
-            st.error(response.text[:1000])
+            st.success(f"Found {len(matches)} live matches")
+
+            for match in matches:
+                home = match.get("home_team") or {}
+                away = match.get("away_team") or {}
+                score = match.get("score") or {}
+                live = match.get("live") or {}
+
+                home_name = home.get("name", "Home")
+                away_name = away.get("name", "Away")
+
+                home_goals = score.get("home")
+                away_goals = score.get("away")
+
+                home_goals = "-" if home_goals is None else home_goals
+                away_goals = "-" if away_goals is None else away_goals
+
+                minute = live.get("elapsed_minutes")
+                minute_text = f"{minute}'" if minute is not None else "—"
+
+                with st.container(border=True):
+                    st.subheader(f"{home_name} v {away_name}")
+                    st.write(
+                        f"**{home_goals} – {away_goals}** "
+                        f"· {minute_text}"
+                    )
+
+                    if match.get("xg_available"):
+                        st.success("xG available")
+                    else:
+                        st.caption("xG not available for this match")
 
     except requests.RequestException as e:
-        st.error(f"Connection error: {e}")
+        st.error(f"Unable to load live matches: {e}")
+    except (KeyError, ValueError, TypeError) as e:
+        st.error(f"Unable to process match data: {e}")
 
 # Test live xG for a specific match
 st.subheader("⚽ Live xG Test")
