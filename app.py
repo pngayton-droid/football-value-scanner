@@ -268,3 +268,56 @@ if st.button("Fetch Today's Matches"):
 
     except Exception as e:
         st.error(str(e))
+# PITCHAPI MATCH STATISTICS TEST
+st.divider()
+st.header("📊 PitchAPI Match Statistics Test")
+
+if st.button("Test Match Statistics"):
+    try:
+        today = datetime.now(
+            ZoneInfo("Europe/London")
+        ).date().isoformat()
+
+        fixtures = requests.get(
+            f"https://api.pitchapi.dev/v1/date/{today}",
+            headers={
+                "X-API-KEY": st.secrets["PITCH_API_KEY"]
+            },
+            params={"status": "all"},
+            timeout=20
+        )
+        fixtures.raise_for_status()
+
+        matches = fixtures.json().get(
+            "data", {}
+        ).get("matches", [])
+
+        finished = [
+            m for m in matches
+            if m.get("status") == "finished"
+        ]
+
+        if not finished:
+            st.info("No finished matches available yet.")
+        else:
+            match = finished[0]
+            st.write("Selected match:", match.get("id"))
+
+            stats = requests.get(
+                f"https://api.pitchapi.dev/v1/matches/{match['id']}/stats",
+                headers={
+                    "X-API-KEY": st.secrets["PITCH_API_KEY"]
+                },
+                timeout=20
+            )
+
+            st.write("HTTP status:", stats.status_code)
+
+            if stats.ok:
+                st.success("Statistics retrieved!")
+                st.json(stats.json())
+            else:
+                st.error(stats.text[:500])
+
+    except Exception as e:
+        st.error(f"Statistics test error: {e}")
