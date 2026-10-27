@@ -498,3 +498,34 @@ if st.button("Find Live Matches"):
 
     except requests.RequestException as e:
         st.error(f"Connection error: {e}")
+
+# Test live xG for a specific match
+st.subheader("⚽ Live xG Test")
+
+if st.button("Test Live xG"):
+    import requests
+
+    match_id = "mt_156097404"
+    url = (
+        "https://api.thestatsapi.com"
+        f"/api/football/matches/{match_id}"
+    )
+
+    headers = {
+        "Authorization": f"Bearer {st.secrets['STATS_API_KEY']}"
+    }
+
+    try:
+        response = requests.get(
+            url, headers=headers, timeout=20
+        )
+
+        st.write("HTTP status:", response.status_code)
+
+        if response.ok:
+            st.json(response.json())
+        else:
+            st.write(response.text[:1000])
+
+    except requests.RequestException as e:
+        st.error(str(e))
