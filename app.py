@@ -407,24 +407,7 @@ if matches:
         except Exception as e:
             st.error(str(e))
 
-st.subheader("🔴 PitchAPI Live Feed Test")
 
-if st.button("Check Live Matches"):
-    import requests
-
-    url = "https://api.pitchapi.dev/v1/matches/live"
-    headers = {
-        "X-API-KEY": st.secrets["PITCH_API_KEY"]
-    }
-
-    response = requests.get(
-        url,
-        headers=headers,
-        timeout=20
-    )
-
-    st.write("HTTP status:", response.status_code)
-    st.json(response.json())
 
 # TheStatsAPI connection test
 st.subheader("⚽ TheStatsAPI Connection Test")
