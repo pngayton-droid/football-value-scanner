@@ -146,3 +146,62 @@ if "API_FOOTBALL_KEY" in st.secrets:
         st.error(f"Unable to load fixtures: {e}")
 else:
     st.warning("API-Football key not configured.")
+# MATCH STATISTICS EXPLORER
+
+st.divider()
+st.header("📊 Match Statistics Explorer")
+
+if "API_FOOTBALL_KEY" in st.secrets:
+    if "data" in locals() and data.get("response"):
+        matches = data["response"]
+
+        match_options = {
+            f"{m['teams']['home']['name']} v "
+            f"{m['teams']['away']['name']} "
+            f"({m['fixture']['status']['short']})":
+            m["fixture"]["id"]
+            for m in matches
+        }
+
+        selected_match = st.selectbox(
+            "Choose a match",
+            list(match_options.keys())
+        )
+
+        if st.button("Get match statistics"):
+            fixture_id = match_options[selected_match]
+
+            try:
+                stats_response = requests.get(
+                    "https://v3.football.api-sports.io/fixtures/statistics",
+                    headers={
+                        "x-apisports-key":
+                        st.secrets["API_FOOTBALL_KEY"]
+                    },
+                    params={"fixture": fixture_id},
+                    timeout=15
+                )
+
+                stats_response.raise_for_status()
+                stats_data = stats_response.json()
+
+                if stats_data.get("errors"):
+                    st.error(stats_data["errors"])
+                elif stats_data.get("response"):
+                    for team in stats_data["response"]:
+                        st.subheader(team["team"]["name"])
+
+                        for stat in team["statistics"]:
+                            st.write(
+                                f"{stat['type']}: {stat['value']}"
+                            )
+                else:
+                    st.info(
+                        "Statistics aren't available "
+                        "for this match yet."
+                    )
+
+            except Exception as e:
+                st.error(f"Statistics error: {e}")
+    else:
+        st.info("No fixtures available to select.")
