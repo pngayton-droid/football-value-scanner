@@ -227,3 +227,27 @@ if st.button("Test Live xG"):
 
     except requests.RequestException as e:
         st.error(str(e))
+
+
+
+st.subheader("Live xG Endpoint Test")
+
+if st.button("Test Live xG"):
+    match_id = "mt_156097404"
+    url = f"https://api.thestatsapi.com/api/football/matches/{match_id}/live-stats"
+
+    headers = {
+        "Authorization": f"Bearer {st.secrets['STATS_API_KEY']}"
+    }
+
+    try:
+        response = requests.get(url, headers=headers, timeout=20)
+        st.write("HTTP status:", response.status_code)
+
+        if response.ok:
+            st.json(response.json())
+        else:
+            st.write(response.text[:1000])
+
+    except requests.RequestException as e:
+        st.error(str(e))
