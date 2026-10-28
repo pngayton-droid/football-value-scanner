@@ -747,3 +747,338 @@ if matches:
                 st.json(payload)
 
 
+
+# AUTOMATIC HALFTIME SCANNER - STAGE 1
+
+st.divider()
+st.header("🔎 Automatic Halftime Scanner")
+
+st.caption(
+    "Checks live matches for halftime data and bookmaker "
+    "coverage. No betting signals are issued until all "
+    "required inputs and market definitions are verified."
+)
+
+AUTO_BASE = "https://api.thestatsapi.com/api/football/matches"
+
+
+def auto_headers():
+    return {
+        "Authorization": f"Bearer {st.secrets['STATS_API_KEY']}"
+    }
+
+
+def auto_get(url, params=None):
+    response = requests.get(
+        url,
+        headers=auto_headers(),
+        params=params,
+        timeout=20
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def auto_halftime(match):
+    live = match.get("live") or {}
+
+    values = [
+        match.get("status"),
+        match.get("status_short"),
+        live.get("status"),
+        live.get("status_short"),
+        live.get("period"),
+        live.get("phase")
+    ]
+
+    accepted = {
+        "ht",
+        "half_time",
+        "halftime",
+        "half-time",
+        "half time",
+        "half_time_break",
+        "half-time break"
+    }
+
+    return any(
+        str(value).strip().lower() in accepted
+        for value in values
+        if value is not None
+    )
+
+
+def auto_first_half_xg(payload):
+    data = payload.get("data") or payload
+
+    if not isinstance(data, dict):
+        return None, None
+
+    candidates = [
+        data.get("overview"),
+        data.get("statistics"),
+        data.get("stats"),
+        data
+    ]
+
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+
+        xg = candidate.get("expected_goals")
+
+        if not isinstance(xg, dict):
+            continue
+
+        first_half = xg.get("first_half")
+
+        if not isinstance(first_half, dict):
+            continue
+
+        try:
+            home_xg = float(first_half["home"])
+            away_xg = float(first_half["away"])
+
+            if (
+                math.isfinite(home_xg)
+                and math.isfinite(away_xg)
+                and home_xg >= 0
+                and away_xg >= 0
+            ):
+                return home_xg, away_xg
+
+        except (KeyError, TypeError, ValueError):
+            continue
+
+    return None, None
+
+
+def auto_find_xg(match_id):
+    errors = []
+
+    for endpoint in ("live-stats", "stats"):
+        try:
+            payload = auto_get(
+                f"{AUTO_BASE}/{match_id}/{endpoint}"
+            )
+
+            home_xg, away_xg = auto_first_half_xg(
+                payload
+            )
+
+            if home_xg is not None:
+                return home_xg, away_xg, endpoint
+
+        except (
+            requests.RequestException,
+            ValueError,
+            TypeError
+        ) as e:
+            errors.append(str(e))
+
+    return None, None, "Unavailable"
+
+
+def auto_bookmaker_summary(payload):
+    data = payload.get("data") or {}
+    bookmakers = data.get("bookmakers") or []
+
+    if not isinstance(bookmakers, list):
+        return [], 0
+
+    names = []
+    selections = 0
+
+    for bookmaker in bookmakers:
+        if not isinstance(bookmaker, dict):
+            continue
+
+        name = str(
+            bookmaker.get("bookmaker", "Unknown")
+        )
+        names.append(name)
+
+        markets = bookmaker.get("markets") or {}
+
+        if isinstance(markets, dict):
+            selections += len(markets)
+
+    return names, selections
+
+
+if st.button(
+    "🔍 Scan All Live Matches",
+    key="automatic_halftime_scan"
+):
+    try:
+        payload = auto_get(
+            AUTO_BASE,
+            params={
+                "status": "live",
+                "per_page": 100
+            }
+        )
+
+        matches = payload.get("data") or []
+
+        if not isinstance(matches, list):
+            st.error("Unexpected live match response.")
+
+        else:
+            st.write(
+                f"Live matches returned: {len(matches)}"
+            )
+
+            halftime_matches = [
+                match for match in matches
+                if isinstance(match, dict)
+                and match.get("id")
+                and auto_halftime(match)
+            ]
+
+            st.write(
+                f"Halftime matches detected: "
+                f"{len(halftime_matches)}"
+            )
+
+            if not halftime_matches:
+                st.info(
+                    "No matches were identified as being "
+                    "at halftime. The API may use a different "
+                    "status label, so this is not yet proof "
+                    "that no matches are at halftime."
+                )
+
+                with st.expander(
+                    "Inspect live status labels"
+                ):
+                    for match in matches[:20]:
+                        st.write({
+                            "match_id": match.get("id"),
+                            "status": match.get("status"),
+                            "status_short": match.get(
+                                "status_short"
+                            ),
+                            "live": match.get("live")
+                        })
+
+            else:
+                results = []
+
+                progress = st.progress(0)
+
+                for index, match in enumerate(
+                    halftime_matches
+                ):
+                    match_id = str(match["id"])
+
+                    home = (
+                        match.get("home_team") or {}
+                    ).get("name", "Home")
+
+                    away = (
+                        match.get("away_team") or {}
+                    ).get("name", "Away")
+
+                    score = match.get("score") or {}
+
+                    home_goals = score.get("home")
+                    away_goals = score.get("away")
+
+                    home_xg, away_xg, xg_source = (
+                        auto_find_xg(match_id)
+                    )
+
+                    bookmaker_names = []
+                    odds_status = "Unavailable"
+
+                    if match.get("live_odds_available"):
+                        try:
+                            odds_payload = auto_get(
+                                f"{AUTO_BASE}/{match_id}"
+                                "/odds/live"
+                            )
+
+                            bookmaker_names, count = (
+                                auto_bookmaker_summary(
+                                    odds_payload
+                                )
+                            )
+
+                            odds_status = (
+                                f"{len(bookmaker_names)} "
+                                "bookmakers"
+                            )
+
+                        except (
+                            requests.RequestException,
+                            ValueError,
+                            TypeError
+                        ):
+                            odds_status = "Request failed"
+
+                    xg_ready = (
+                        home_xg is not None
+                        and away_xg is not None
+                    )
+
+                    results.append({
+                        "Match": f"{home} v {away}",
+                        "HT score": (
+                            f"{home_goals}-{away_goals}"
+                        ),
+                        "Home HT xG": home_xg,
+                        "Away HT xG": away_xg,
+                        "xG source": xg_source,
+                        "Odds": odds_status,
+                        "Betfair": any(
+                            "betfair exchange" in n.lower()
+                            for n in bookmaker_names
+                        ),
+                        "Data status": (
+                            "xG and odds found"
+                            if xg_ready and bookmaker_names
+                            else "Incomplete"
+                        )
+                    })
+
+                    progress.progress(
+                        (index + 1)
+                        / len(halftime_matches)
+                    )
+
+                report = pd.DataFrame(results)
+
+                st.subheader("Halftime Scan Results")
+
+                st.dataframe(
+                    report,
+                    hide_index=True,
+                    use_container_width=True
+                )
+
+                st.download_button(
+                    "Download Halftime Scan",
+                    report.to_csv(
+                        index=False
+                    ).encode("utf-8"),
+                    file_name="halftime_scan.csv",
+                    mime="text/csv"
+                )
+
+                st.warning(
+                    "Data readiness is not a value signal. "
+                    "We still need verified pre-match "
+                    "favourite odds, exact halftime scores "
+                    "and confirmed bookmaker market "
+                    "definitions before running the "
+                    "historical value calculations."
+                )
+
+    except (
+        requests.RequestException,
+        ValueError,
+        KeyError,
+        TypeError
+    ) as e:
+        st.error(f"Automatic scan failed: {e}")
