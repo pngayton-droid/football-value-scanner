@@ -419,3 +419,94 @@ if st.button("Check Historical Data Coverage"):
 
     except requests.RequestException as e:
         st.error(f"Coverage test failed: {e}")
+
+# LIVE BOOKMAKER ODDS COVERAGE TEST
+
+st.divider()
+st.header("💷 Live Bookmaker Odds Test")
+
+if st.button("Check Live Bookmaker Odds"):
+    base_url = "https://api.thestatsapi.com/api/football/matches"
+
+    headers = {
+        "Authorization": f"Bearer {st.secrets['STATS_API_KEY']}"
+    }
+
+    try:
+        response = requests.get(
+            base_url,
+            headers=headers,
+            params={
+                "status": "live",
+                "per_page": 100
+            },
+            timeout=20
+        )
+
+        st.write("Match search HTTP:", response.status_code)
+        response.raise_for_status()
+
+        matches = response.json().get("data", [])
+
+        if not isinstance(matches, list):
+            st.error("Unexpected match list format.")
+
+        elif not matches:
+            st.info("No live matches available to test.")
+
+        else:
+            st.success(f"Found {len(matches)} live matches")
+
+            for match in matches[:5]:
+                match_id = match.get("id")
+
+                if not match_id:
+                    continue
+
+                home = (match.get("home_team") or {}).get(
+                    "name", "Home"
+                )
+                away = (match.get("away_team") or {}).get(
+                    "name", "Away"
+                )
+
+                with st.expander(f"{home} v {away}"):
+                    st.write("Match ID:", match_id)
+                    st.write(
+                        "Live odds available:",
+                        match.get("live_odds_available")
+                    )
+
+                    odds_url = (
+                        f"{base_url}/{match_id}/odds/live"
+                    )
+
+                    try:
+                        odds_response = requests.get(
+                            odds_url,
+                            headers=headers,
+                            timeout=20
+                        )
+
+                        st.write(
+                            "Odds HTTP:",
+                            odds_response.status_code
+                        )
+
+                        if odds_response.ok:
+                            odds_data = odds_response.json()
+
+                            st.write("Bookmaker odds response:")
+                            st.json(odds_data)
+
+                        else:
+                            st.warning(
+                                "Odds unavailable or request rejected."
+                            )
+                            st.code(odds_response.text[:1000])
+
+                    except requests.RequestException as e:
+                        st.error(f"Odds request failed: {e}")
+
+    except requests.RequestException as e:
+        st.error(f"Match search failed: {e}")
