@@ -421,30 +421,129 @@ if st.button("Check Historical Data Coverage"):
         st.error(f"Coverage test failed: {e}")
 
 
-# LIVE BOOKMAKER ODDS COMPARISON
+
+# LIVE BOOKMAKER ODDS COMPARISON AND BETFAIR MONITOR
 
 st.divider()
-st.header("💷 Live Bookmaker Odds Comparison")
+st.header("💷 Live Odds & Betfair Market Monitor")
 st.caption(
-    "API bookmaker quotes may be delayed or unavailable. "
-    "Prices are not verified as currently executable."
+    "Research only. API quotes may be delayed, stale or suspended. "
+    "Displayed liquidity is not guaranteed to be executable."
 )
 
 ODDS_BASE = "https://api.thestatsapi.com/api/football/matches"
 
-def odds_headers():
+if "odds_matches" not in st.session_state:
+    st.session_state.odds_matches = []
+
+if "odds_payload" not in st.session_state:
+    st.session_state.odds_payload = None
+
+if "odds_match_id" not in st.session_state:
+    st.session_state.odds_match_id = None
+
+
+def get_odds_headers():
     return {
         "Authorization": f"Bearer {st.secrets['STATS_API_KEY']}"
     }
 
-if "odds_matches" not in st.session_state:
-    st.session_state.odds_matches = []
+
+def flatten_market_prices(node, path, bookmaker, rows):
+    if not isinstance(node, dict):
+        return
+
+    if "live" in node:
+        try:
+            price = float(node["live"])
+        except (TypeError, ValueError):
+            return
+
+        if price > 1:
+            rows.append({
+                "Market": " / ".join(path),
+                "Bookmaker": bookmaker,
+                "Back price": price
+            })
+        return
+
+    for key, value in node.items():
+        flatten_market_prices(
+            value,
+            path + [str(key)],
+            bookmaker,
+            rows
+        )
+
+
+def flatten_betfair(node, path, rows):
+    if not isinstance(node, dict):
+        return
+
+    if (
+        "available_to_back" in node
+        or "available_to_lay" in node
+    ):
+        backs = node.get("available_to_back") or []
+        lays = node.get("available_to_lay") or []
+
+        def best_offer(offers, reverse):
+            valid = []
+
+            for offer in offers:
+                if not isinstance(offer, dict):
+                    continue
+
+                try:
+                    price = float(offer.get("price"))
+                    size = float(offer.get("size"))
+                except (TypeError, ValueError):
+                    continue
+
+                if price > 1 and size > 0:
+                    valid.append((price, size))
+
+            if not valid:
+                return None, None
+
+            valid.sort(
+                key=lambda item: item[0],
+                reverse=reverse
+            )
+            return valid[0]
+
+        back, back_size = best_offer(backs, True)
+        lay, lay_size = best_offer(lays, False)
+
+        spread = (
+            round(lay - back, 3)
+            if back is not None and lay is not None
+            else None
+        )
+
+        rows.append({
+            "Market": " / ".join(path),
+            "Best back": back,
+            "Back liquidity": back_size,
+            "Best lay": lay,
+            "Lay liquidity": lay_size,
+            "Spread": spread
+        })
+        return
+
+    for key, value in node.items():
+        flatten_betfair(
+            value,
+            path + [str(key)],
+            rows
+        )
+
 
 if st.button("Find Live Matches", key="find_odds_matches"):
     try:
         response = requests.get(
             ODDS_BASE,
-            headers=odds_headers(),
+            headers=get_odds_headers(),
             params={"status": "live", "per_page": 100},
             timeout=20
         )
@@ -457,6 +556,9 @@ if st.button("Find Live Matches", key="find_odds_matches"):
                 m for m in matches
                 if isinstance(m, dict) and m.get("id")
             ]
+            st.session_state.odds_payload = None
+            st.session_state.odds_match_id = None
+
             st.success(
                 f"Found {len(st.session_state.odds_matches)} live matches"
             )
@@ -466,21 +568,27 @@ if st.button("Find Live Matches", key="find_odds_matches"):
     except (requests.RequestException, ValueError, KeyError) as e:
         st.error(f"Match search failed: {e}")
 
+
 matches = st.session_state.odds_matches
 
 if matches:
     match_options = {}
 
     for match in matches:
-        home = (match.get("home_team") or {}).get(
-            "name", "Home"
-        )
-        away = (match.get("away_team") or {}).get(
-            "name", "Away"
-        )
+        home_name = (
+            match.get("home_team") or {}
+        ).get("name", "Home")
+
+        away_name = (
+            match.get("away_team") or {}
+        ).get("name", "Away")
+
         match_id = str(match["id"])
 
-        label = f"{home} v {away} [{match_id}]"
+        label = (
+            f"{home_name} v {away_name} [{match_id}]"
+        )
+
         match_options[label] = match
 
     selected_label = st.selectbox(
@@ -490,209 +598,152 @@ if matches:
     )
 
     selected_match = match_options[selected_label]
-    selected_id = selected_match["id"]
+    selected_id = str(selected_match["id"])
 
     st.write(
-        "Live odds flag:",
+        "Live odds available:",
         selected_match.get("live_odds_available")
     )
 
-    if st.button("Compare Bookmaker Odds", key="compare_odds"):
-        odds_url = f"{ODDS_BASE}/{selected_id}/odds/live"
-
+    if st.button("Load Bookmaker Odds", key="load_bookmaker_odds"):
         try:
             response = requests.get(
-                odds_url,
-                headers=odds_headers(),
+                f"{ODDS_BASE}/{selected_id}/odds/live",
+                headers=get_odds_headers(),
                 timeout=20
             )
 
             st.write("Odds HTTP:", response.status_code)
 
-            if not response.ok:
-                st.warning("No live odds returned for this match.")
+            if response.ok:
+                st.session_state.odds_payload = response.json()
+                st.session_state.odds_match_id = selected_id
+            else:
+                st.session_state.odds_payload = None
+                st.session_state.odds_match_id = None
+                st.warning("Odds unavailable for this match.")
                 st.code(response.text[:1000])
 
-            else:
-                payload = response.json()
-                data = payload.get("data") or {}
-                bookmakers = data.get("bookmakers") or []
-
-                if not isinstance(bookmakers, list):
-                    st.error("Unexpected bookmaker response format.")
-
-                elif not bookmakers:
-                    st.info("No bookmakers returned.")
-
-                else:
-                    names = [
-                        str(b.get("bookmaker", "Unknown"))
-                        for b in bookmakers
-                        if isinstance(b, dict)
-                    ]
-
-                    st.success(
-                        f"Found {len(names)} bookmaker entries"
-                    )
-                    st.write("Bookmakers:", ", ".join(names))
-
-                    betfair_entries = [
-                        name for name in names
-                        if "betfair" in name.lower()
-                    ]
-
-                    if betfair_entries:
-                        st.success(
-                            "Betfair found: "
-                            + ", ".join(betfair_entries)
-                        )
-                    else:
-                        st.warning(
-                            "Betfair was not returned for this match."
-                        )
-
-                    rows = []
-
-                    def collect_prices(node, path, bookmaker):
-                        if not isinstance(node, dict):
-                            return
-
-                        if "live" in node:
-                            try:
-                                price = float(node["live"])
-                            except (ValueError, TypeError):
-                                price = 0
-
-                            if price > 1:
-                                rows.append({
-                                    "Market / selection": " / ".join(path),
-                                    "Bookmaker": bookmaker,
-                                    "Price": price
-                                })
-                            return
-
-                        for key, value in node.items():
-                            collect_prices(
-                                value,
-                                path + [str(key)],
-                                bookmaker
-                            )
-
-                    for bookmaker_data in bookmakers:
-                        if not isinstance(bookmaker_data, dict):
-                            continue
-
-                        bookmaker_name = str(
-                            bookmaker_data.get(
-                                "bookmaker", "Unknown"
-                            )
-                        )
-
-                        markets_data = (
-                            bookmaker_data.get("markets") or {}
-                        )
-
-                        collect_prices(
-                            markets_data,
-                            [],
-                            bookmaker_name
-                        )
-
-                    if rows:
-                        odds_df = pd.DataFrame(rows)
-
-                        st.subheader("All Available Prices")
-                        st.dataframe(
-                            odds_df,
-                            hide_index=True,
-                            use_container_width=True
-                        )
-
-                        best_idx = odds_df.groupby(
-                            "Market / selection"
-                        )["Price"].idxmax()
-
-                        best_df = odds_df.loc[best_idx].copy()
-                        best_df = best_df.sort_values(
-                            "Market / selection"
-                        )
-
-                        st.subheader("🏆 Best Bookmaker Prices")
-                        st.dataframe(
-                            best_df,
-                            hide_index=True,
-                            use_container_width=True
-                        )
-
-                        st.download_button(
-                            "Download Best Prices CSV",
-                            best_df.to_csv(
-                                index=False
-                            ).encode("utf-8"),
-                            file_name="best_live_odds.csv",
-                            mime="text/csv"
-                        )
-
-                    else:
-                        st.info(
-                            "Bookmakers were returned, "
-                            "but no valid live prices were found."
-                        )
-
-                    with st.expander("View Original API Response"):
-                        st.json(payload)
-
         except (requests.RequestException, ValueError) as e:
-            st.error(f"Odds comparison failed: {e}")
+            st.session_state.odds_payload = None
+            st.session_state.odds_match_id = None
+            st.error(f"Odds request failed: {e}")
 
-    if st.button(
-        "Test Betfair Exchange Specifically",
-        key="test_betfair_exchange"
+    payload = st.session_state.odds_payload
+
+    if (
+        payload is not None
+        and st.session_state.odds_match_id == selected_id
     ):
-        odds_url = f"{ODDS_BASE}/{selected_id}/odds/live"
+        data = payload.get("data") or {}
+        bookmakers = data.get("bookmakers") or []
 
-        try:
-            response = requests.get(
-                odds_url,
-                headers=odds_headers(),
-                params={"bookmaker": "betfair-exchange"},
-                timeout=20
+        if not isinstance(bookmakers, list):
+            st.error("Unexpected bookmaker response format.")
+
+        elif not bookmakers:
+            st.info("No bookmaker prices returned.")
+
+        else:
+            names = [
+                str(b.get("bookmaker", "Unknown"))
+                for b in bookmakers
+                if isinstance(b, dict)
+            ]
+
+            st.success(
+                f"Bookmakers returned: {', '.join(names)}"
             )
 
-            st.write(
-                "Betfair-specific HTTP:",
-                response.status_code
-            )
+            all_rows = []
+            betfair_rows = []
 
-            if response.ok:
-                payload = response.json()
-                data = payload.get("data") or {}
-                bookmaker_list = data.get("bookmakers") or []
+            for bookmaker in bookmakers:
+                if not isinstance(bookmaker, dict):
+                    continue
 
-                names = [
-                    str(b.get("bookmaker", "Unknown"))
-                    for b in bookmaker_list
-                    if isinstance(b, dict)
-                ]
+                name = str(
+                    bookmaker.get("bookmaker", "Unknown")
+                )
+                markets = bookmaker.get("markets") or {}
 
-                st.write("Returned bookmakers:", names)
+                flatten_market_prices(
+                    markets,
+                    [],
+                    name,
+                    all_rows
+                )
 
-                if any("betfair" in n.lower() for n in names):
-                    st.success("Betfair data returned.")
-                else:
-                    st.warning(
-                        "No Betfair bookmaker identified. "
-                        "The API may have ignored the filter."
+                if "betfair exchange" in name.lower():
+                    flatten_betfair(
+                        markets,
+                        [],
+                        betfair_rows
                     )
 
-                st.json(payload)
+            if all_rows:
+                all_df = pd.DataFrame(all_rows)
+
+                best_idx = all_df.groupby(
+                    "Market"
+                )["Back price"].idxmax()
+
+                best_df = all_df.loc[best_idx].copy()
+                best_df = best_df.sort_values("Market")
+
+                st.subheader("🏆 Best Bookmaker Prices")
+                st.dataframe(
+                    best_df,
+                    hide_index=True,
+                    use_container_width=True
+                )
+
+                with st.expander("All Bookmaker Prices"):
+                    st.dataframe(
+                        all_df,
+                        hide_index=True,
+                        use_container_width=True
+                    )
+
+            st.divider()
+            st.subheader("🟠 Betfair Exchange Monitor")
+
+            if betfair_rows:
+                betfair_df = pd.DataFrame(betfair_rows)
+
+                st.success(
+                    f"Found {len(betfair_df)} Betfair selections"
+                )
+
+                st.dataframe(
+                    betfair_df,
+                    hide_index=True,
+                    use_container_width=True
+                )
+
+                st.download_button(
+                    "Download Betfair Market Data",
+                    betfair_df.to_csv(
+                        index=False
+                    ).encode("utf-8"),
+                    file_name="betfair_market_monitor.csv",
+                    mime="text/csv"
+                )
+
+                st.caption(
+                    "Back and lay prices are separate. "
+                    "Liquidity is the size at the displayed quote. "
+                    "A missing lay price means no lay offer was "
+                    "returned for that selection."
+                )
 
             else:
                 st.warning(
-                    "Betfair-specific request did not succeed."
+                    "No Betfair Exchange order-book data "
+                    "returned for this match."
                 )
-                st.code(response.text[:1000])
 
-        except (requests.RequestException, ValueError) as e:
-            st.error(f"Betfair test failed: {e}")
+            with st.expander("View Original API Response"):
+                st.json(payload)
+
 
