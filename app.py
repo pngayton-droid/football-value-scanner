@@ -1082,3 +1082,149 @@ if st.button(
         TypeError
     ) as e:
         st.error(f"Automatic scan failed: {e}")
+
+# LIVE XG DIAGNOSTIC TOOL
+
+st.divider()
+st.header("🔬 Live xG Diagnostic")
+
+st.caption(
+    "Inspect actual live-statistics responses to determine "
+    "whether xG is missing or stored in a different format."
+)
+
+XG_BASE = "https://api.thestatsapi.com/api/football/matches"
+
+if "xg_diag_matches" not in st.session_state:
+    st.session_state.xg_diag_matches = []
+
+if st.button("Find Matches for xG Test", key="xg_diag_find"):
+    try:
+        response = requests.get(
+            XG_BASE,
+            headers={
+                "Authorization": (
+                    f"Bearer {st.secrets['STATS_API_KEY']}"
+                )
+            },
+            params={
+                "status": "live",
+                "per_page": 100
+            },
+            timeout=20
+        )
+
+        response.raise_for_status()
+
+        matches = response.json().get("data", [])
+
+        if isinstance(matches, list):
+            st.session_state.xg_diag_matches = [
+                m for m in matches
+                if isinstance(m, dict) and m.get("id")
+            ]
+
+            st.success(
+                f"Found {len(st.session_state.xg_diag_matches)} "
+                "live matches"
+            )
+        else:
+            st.error("Unexpected match response.")
+
+    except (requests.RequestException, ValueError) as e:
+        st.error(f"Match search failed: {e}")
+
+
+diag_matches = st.session_state.xg_diag_matches
+
+if diag_matches:
+    options = {}
+
+    for match in diag_matches:
+        home = (
+            match.get("home_team") or {}
+        ).get("name", "Home")
+
+        away = (
+            match.get("away_team") or {}
+        ).get("name", "Away")
+
+        match_id = str(match["id"])
+
+        label = f"{home} v {away} [{match_id}]"
+        options[label] = match
+
+    selected_label = st.selectbox(
+        "Choose match to inspect",
+        list(options.keys()),
+        key="xg_diag_selection"
+    )
+
+    selected_match = options[selected_label]
+    selected_id = str(selected_match["id"])
+
+    st.write(
+        "xG available flag:",
+        selected_match.get("xg_available")
+    )
+
+    st.write(
+        "Live match status:",
+        selected_match.get("live")
+    )
+
+    if st.button(
+        "Inspect Live Statistics",
+        key="xg_diag_inspect"
+    ):
+        headers = {
+            "Authorization": (
+                f"Bearer {st.secrets['STATS_API_KEY']}"
+            )
+        }
+
+        for endpoint in ("live-stats", "stats"):
+            st.subheader(f"Endpoint: {endpoint}")
+
+            try:
+                response = requests.get(
+                    f"{XG_BASE}/{selected_id}/{endpoint}",
+                    headers=headers,
+                    timeout=20
+                )
+
+                st.write(
+                    "HTTP status:",
+                    response.status_code
+                )
+
+                if response.ok:
+                    payload = response.json()
+
+                    home_xg, away_xg = auto_first_half_xg(
+                        payload
+                    )
+
+                    if home_xg is not None:
+                        st.success(
+                            f"First-half xG found: "
+                            f"Home {home_xg:.2f} | "
+                            f"Away {away_xg:.2f}"
+                        )
+                    else:
+                        st.warning(
+                            "Our current extractor did not "
+                            "find first-half xG."
+                        )
+
+                    st.json(payload)
+
+                else:
+                    st.code(response.text[:1000])
+
+            except (
+                requests.RequestException,
+                ValueError,
+                TypeError
+            ) as e:
+                st.error(f"{endpoint} failed: {e}")
