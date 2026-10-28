@@ -132,6 +132,7 @@ if st.button("Test TheStatsAPI"):
     except requests.RequestException as e:
         st.error(f"Connection error: {e}")
 
+
 # THESTATSAPI LIVE MATCH DASHBOARD
 st.divider()
 st.header("⚽ Live Football Dashboard")
@@ -157,8 +158,10 @@ if st.button("Refresh Live Matches"):
 
         if not isinstance(matches, list):
             st.error("Unexpected API response format.")
+
         elif not matches:
             st.info("No live matches found.")
+
         else:
             st.success(f"Found {len(matches)} live matches")
 
@@ -187,42 +190,46 @@ if st.button("Refresh Live Matches"):
                         f"· {minute_text}"
                     )
 
-                    
-if match.get("xg_available"):
-    st.success("xG available")
+                    if match.get("xg_available"):
+                        st.success("xG available")
 
-    match_id = match.get("id")
+                        match_id = match.get("id")
 
-    if match_id:
-        stats_url = (
-            f"https://api.thestatsapi.com"
-            f"/api/football/matches/{match_id}/live-stats"
-        )
+                        if match_id:
+                            stats_url = (
+                                "https://api.thestatsapi.com"
+                                f"/api/football/matches/{match_id}/live-stats"
+                            )
 
-        try:
-            stats_response = requests.get(
-                stats_url,
-                headers=headers,
-                timeout=20
-            )
+                            try:
+                                stats_response = requests.get(
+                                    stats_url,
+                                    headers=headers,
+                                    timeout=20
+                                )
 
-            st.write("Live stats HTTP:", stats_response.status_code)
+                                st.write(
+                                    "Live stats HTTP:",
+                                    stats_response.status_code
+                                )
 
-            if stats_response.ok:
-                st.json(stats_response.json())
-            else:
-                st.write(stats_response.text[:500])
+                                if stats_response.ok:
+                                    st.json(stats_response.json())
+                                else:
+                                    st.write(stats_response.text[:500])
 
-        except requests.RequestException as e:
-            st.error(f"Live stats error: {e}")
+                            except requests.RequestException as e:
+                                st.error(f"Live stats error: {e}")
 
                     else:
                         st.caption("xG not available for this match")
 
     except requests.RequestException as e:
         st.error(f"Unable to load live matches: {e}")
+
     except (KeyError, ValueError, TypeError) as e:
         st.error(f"Unable to process match data: {e}")
+
 
 # Test live xG for a specific match
 st.subheader("⚽ Live xG Test")
