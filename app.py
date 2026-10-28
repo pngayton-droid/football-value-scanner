@@ -316,3 +316,135 @@ if st.button("Test Historical xG", key="historical_xg_test"):
 
     except requests.RequestException as e:
         st.error(f"Historical xG test failed: {e}")
+
+# HISTORICAL STATISTICS COVERAGE TEST
+
+st.divider()
+st.header("⚽ Historical Data Coverage Test")
+
+if st.button("Check Historical Data Coverage"):
+    import pandas as pd
+    from datetime import date, timedelta
+
+    base_url = "https://api.thestatsapi.com/api/football/matches"
+    headers = {
+        "Authorization": f"Bearer {st.secrets['STATS_API_KEY']}"
+    }
+
+    try:
+        # Request a small sample of recently completed matches
+        response = requests.get(
+            base_url,
+            headers=headers,
+            params={
+                "status": "finished",
+                "per_page": 10
+            },
+            timeout=20
+        )
+
+        st.write("Match search HTTP:", response.status_code)
+
+        if not response.ok:
+            st.write(response.text[:1000])
+
+        else:
+            payload = response.json()
+            matches = payload.get("data", [])
+
+            if not isinstance(matches, list):
+                st.error("Unexpected match list format.")
+
+            elif not matches:
+                st.warning("No completed matches returned.")
+
+            else:
+                results = []
+
+                for match in matches[:10]:
+                    match_id = match.get("id")
+
+                    home = match.get("home_team") or {}
+                    away = match.get("away_team") or {}
+
+                    home_name = home.get("name", "Home")
+                    away_name = away.get("name", "Away")
+
+                    if not match_id:
+                        continue
+
+                    stats_url = f"{base_url}/{match_id}/stats"
+
+                    try:
+                        stats_response = requests.get(
+                            stats_url,
+                            headers=headers,
+                            timeout=20
+                        )
+
+                        if stats_response.ok:
+                            stats_payload = stats_response.json()
+                            data = stats_payload.get("data") or {}
+                            overview = data.get("overview") or {}
+
+                            xg = overview.get("expected_goals")
+                            shots = overview.get("total_shots")
+                            possession = overview.get("ball_possession")
+
+                            def has_values(value):
+                                if value is None:
+                                    return False
+                                if isinstance(value, dict):
+                                    return any(
+                                        has_values(v)
+                                        for v in value.values()
+                                    )
+                                return True
+
+                            first_half_shots = (
+                                shots.get("first_half")
+                                if isinstance(shots, dict)
+                                else None
+                            )
+
+                            results.append({
+                                "Match": f"{home_name} v {away_name}",
+                                "Match ID": match_id,
+                                "HTTP": stats_response.status_code,
+                                "xG": has_values(xg),
+                                "Shots": has_values(shots),
+                                "Possession": has_values(possession),
+                                "1H shots": has_values(first_half_shots)
+                            })
+
+                        else:
+                            results.append({
+                                "Match": f"{home_name} v {away_name}",
+                                "Match ID": match_id,
+                                "HTTP": stats_response.status_code,
+                                "xG": False,
+                                "Shots": False,
+                                "Possession": False,
+                                "1H shots": False
+                            })
+
+                    except requests.RequestException as e:
+                        st.warning(f"{match_id}: {e}")
+
+                if results:
+                    df = pd.DataFrame(results)
+                    st.dataframe(
+                        df,
+                        use_container_width=True,
+                        hide_index=True
+                    )
+
+                    st.write(
+                        "Matches with xG:",
+                        int(df["xG"].sum()),
+                        "out of",
+                        len(df)
+                    )
+
+    except requests.RequestException as e:
+        st.error(f"Coverage test failed: {e}")
