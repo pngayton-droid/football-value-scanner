@@ -187,10 +187,37 @@ if st.button("Refresh Live Matches"):
                         f"· {minute_text}"
                     )
 
-                    if match.get("xg_available"):
-                        st.success("xG available")
-                    else:
-                        st.caption("xG not available for this match")
+                    
+if match.get("xg_available"):
+    st.success("xG available")
+
+    match_id = match.get("id")
+
+    if match_id:
+        stats_url = (
+            f"https://api.thestatsapi.com"
+            f"/api/football/matches/{match_id}/live-stats"
+        )
+
+        try:
+            stats_response = requests.get(
+                stats_url,
+                headers=headers,
+                timeout=20
+            )
+
+            st.write("Live stats HTTP:", stats_response.status_code)
+
+            if stats_response.ok:
+                st.json(stats_response.json())
+            else:
+                st.write(stats_response.text[:500])
+
+        except requests.RequestException as e:
+            st.error(f"Live stats error: {e}")
+else:
+    st.caption("xG not available for this match")
+
 
     except requests.RequestException as e:
         st.error(f"Unable to load live matches: {e}")
