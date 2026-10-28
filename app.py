@@ -1627,3 +1627,432 @@ if map_matches:
             KeyError
         ) as error:
             st.error(f"Market mapping failed: {error}")
+
+# ALL-BOOKMAKER PRICE COMPARISON - STAGE 1
+
+st.divider()
+st.header("🏆 All-Bookmaker Price Comparison")
+st.caption(
+    "Compares available back prices across bookmakers. "
+    "Market mappings are provisional, not betting signals."
+)
+
+COMPARE_BASE = "https://api.thestatsapi.com/api/football/matches"
+
+COMPARE_MARKETS = {
+    "Home full-time win": ("match_odds", "home"),
+    "Draw full-time": ("match_odds", "draw"),
+    "Away full-time win": ("match_odds", "away"),
+    "Home scores in 2H": (None, None),
+    "Away scores in 2H": (None, None),
+    "Over 0.5 goals 2H": (None, None),
+    "Over 1.5 goals 2H": (None, None),
+    "Over 2.5 goals 2H": (None, None),
+    "Home wins 2H": ("second_half_result", "home"),
+    "Draw 2H": ("second_half_result", "draw"),
+    "Away wins 2H": ("second_half_result", "away"),
+    "BTTS Yes FT": ("btts", "yes"),
+    "Over 1.5 goals FT": ("total_goals", "over_1_5"),
+    "Under 1.5 goals FT": ("total_goals", "under_1_5"),
+    "Over 2.5 goals FT": ("total_goals", "over_2_5"),
+    "Under 2.5 goals FT": ("total_goals", "under_2_5"),
+    "Over 3.5 goals FT": ("total_goals", "over_3_5"),
+    "Under 3.5 goals FT": ("total_goals", "under_3_5"),
+}
+
+def compare_api(url, params=None):
+    response = requests.get(
+        url,
+        headers={
+            "Authorization": (
+                f"Bearer {st.secrets['STATS_API_KEY']}"
+            )
+        },
+        params=params,
+        timeout=25
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def compare_normalize(value):
+    import re
+    return re.sub(
+        r"[^a-z0-9]+", "_", str(value).lower()
+    ).strip("_")
+
+
+def compare_number(value):
+    try:
+        number = float(value)
+        if math.isfinite(number) and number > 1:
+            return number
+    except (ValueError, TypeError):
+        pass
+    return None
+
+
+def compare_walk(obj, path=()):
+    if isinstance(obj, dict):
+        # A selection node may contain live prices
+        # and/or Exchange order-book offers.
+        if any(
+            key in obj
+            for key in (
+                "live",
+                "available_to_back",
+                "available_to_lay"
+            )
+        ):
+            yield path, obj
+
+        for key, value in obj.items():
+            if isinstance(value, (dict, list)):
+                yield from compare_walk(
+                    value, path + (str(key),)
+                )
+
+    elif isinstance(obj, list):
+        for index, value in enumerate(obj):
+            yield from compare_walk(
+                value, path + (str(index),)
+            )
+
+
+def compare_prices(node, exchange):
+    if exchange:
+        offers = node.get("available_to_back") or []
+        valid = []
+
+        if isinstance(offers, list):
+            for offer in offers:
+                if not isinstance(offer, dict):
+                    continue
+
+                price = compare_number(
+                    offer.get("price")
+                )
+
+                try:
+                    size = float(offer.get("size", 0))
+                except (ValueError, TypeError):
+                    size = 0
+
+                if (
+                    price is not None
+                    and math.isfinite(size)
+                    and size > 0
+                ):
+                    valid.append((price, size))
+
+        if valid:
+            return max(valid, key=lambda x: x[0])
+
+        # Never substitute a generic live quote
+        # for a verified Exchange back offer.
+        return None, None
+
+    return compare_number(node.get("live")), None
+
+
+def compare_collect(payload, commission):
+    data = payload.get("data") or {}
+    bookmakers = data.get("bookmakers") or []
+    rows = []
+
+    for bookmaker in bookmakers:
+        if not isinstance(bookmaker, dict):
+            continue
+
+        name = str(
+            bookmaker.get("bookmaker", "Unknown")
+        )
+        exchange = "betfair exchange" in name.lower()
+        markets = bookmaker.get("markets") or {}
+
+        if not isinstance(markets, dict):
+            continue
+
+        for path, node in compare_walk(markets):
+            if len(path) < 2:
+                continue
+
+            market = compare_normalize(path[0])
+            selection = "/".join(
+                compare_normalize(p) for p in path[1:]
+            )
+
+            price, size = compare_prices(
+                node, exchange
+            )
+
+            effective = None
+            if price is not None:
+                effective = (
+                    1 + (price - 1) * (1 - commission)
+                    if exchange else price
+                )
+
+            rows.append({
+                "Bookmaker": name,
+                "Market": market,
+                "Selection": selection,
+                "Odds": price,
+                "Effective odds": effective,
+                "Back size": size,
+                "Exchange": exchange
+            })
+
+    return pd.DataFrame(rows)
+
+
+if "compare_matches" not in st.session_state:
+    st.session_state.compare_matches = []
+
+if st.button(
+    "Find Live Matches",
+    key="compare_find_matches"
+):
+    try:
+        payload = compare_api(
+            COMPARE_BASE,
+            {"status": "live", "per_page": 100}
+        )
+
+        matches = payload.get("data") or []
+
+        if isinstance(matches, list):
+            st.session_state.compare_matches = [
+                m for m in matches
+                if isinstance(m, dict) and m.get("id")
+            ]
+            st.success(
+                f"Found {len(st.session_state.compare_matches)} "
+                "live matches"
+            )
+        else:
+            st.error("Unexpected match response.")
+
+    except (requests.RequestException, ValueError) as e:
+        st.error(f"Match search failed: {e}")
+
+
+compare_matches = st.session_state.compare_matches
+
+if compare_matches:
+    options = {}
+
+    for match in compare_matches:
+        home = (
+            match.get("home_team") or {}
+        ).get("name", "Home")
+        away = (
+            match.get("away_team") or {}
+        ).get("name", "Away")
+        match_id = str(match["id"])
+
+        options[f"{home} v {away} [{match_id}]"] = match
+
+    selected_label = st.selectbox(
+        "Choose match",
+        list(options),
+        key="compare_match_select"
+    )
+
+    selected_id = str(
+        options[selected_label]["id"]
+    )
+
+    commission_pct = st.number_input(
+        "Betfair Exchange commission (%)",
+        min_value=0.0,
+        max_value=20.0,
+        value=2.0,
+        step=0.5,
+        key="compare_commission"
+    )
+
+    betfair_only = st.checkbox(
+        "Show Betfair Exchange only",
+        value=False,
+        key="compare_betfair_only"
+    )
+
+    if st.button(
+        "Compare All 18 Markets",
+        key="compare_run"
+    ):
+        try:
+            payload = compare_api(
+                f"{COMPARE_BASE}/{selected_id}/odds/live"
+            )
+
+            odds = compare_collect(
+                payload,
+                commission_pct / 100
+            )
+
+            if odds.empty:
+                st.warning(
+                    "No price selections were found."
+                )
+
+            else:
+                st.write(
+                    "Bookmakers:",
+                    ", ".join(
+                        sorted(
+                            odds["Bookmaker"].unique()
+                        )
+                    )
+                )
+
+                if betfair_only:
+                    odds = odds[
+                        odds["Exchange"]
+                    ].copy()
+
+                results = []
+
+                for name, mapping in (
+                    COMPARE_MARKETS.items()
+                ):
+                    market, selection = mapping
+
+                    if market is None:
+                        results.append({
+                            "Historical market": name,
+                            "Status": "Needs mapping",
+                            "Best bookmaker": None,
+                            "Odds": None,
+                            "Effective odds": None,
+                            "Betfair odds": None,
+                            "Back size": None
+                        })
+                        continue
+
+                    matches = odds[
+                        (odds["Market"] == market)
+                        & (
+                            odds["Selection"]
+                            == selection
+                        )
+                    ].copy()
+
+                    priced = matches.dropna(
+                        subset=["Effective odds"]
+                    )
+
+                    if priced.empty:
+                        results.append({
+                            "Historical market": name,
+                            "Status": (
+                                "Selection found, no back price"
+                                if not matches.empty
+                                else "No exact match"
+                            ),
+                            "Best bookmaker": None,
+                            "Odds": None,
+                            "Effective odds": None,
+                            "Betfair odds": None,
+                            "Back size": None
+                        })
+                        continue
+
+                    best = priced.sort_values(
+                        "Effective odds",
+                        ascending=False
+                    ).iloc[0]
+
+                    bf = priced[
+                        priced["Exchange"]
+                    ]
+
+                    if not bf.empty:
+                        bf_best = bf.sort_values(
+                            "Effective odds",
+                            ascending=False
+                        ).iloc[0]
+                        bf_odds = bf_best["Odds"]
+                        bf_size = bf_best["Back size"]
+                    else:
+                        bf_odds = None
+                        bf_size = None
+
+                    results.append({
+                        "Historical market": name,
+                        "Status": "Candidate - verify",
+                        "Best bookmaker": best["Bookmaker"],
+                        "Odds": best["Odds"],
+                        "Effective odds": best["Effective odds"],
+                        "Betfair odds": bf_odds,
+                        "Back size": bf_size
+                    })
+
+                result_df = pd.DataFrame(results)
+
+                st.subheader(
+                    "18-Market Price Comparison"
+                )
+
+                st.dataframe(
+                    result_df,
+                    hide_index=True,
+                    use_container_width=True
+                )
+
+                st.download_button(
+                    "Download Comparison",
+                    result_df.to_csv(
+                        index=False
+                    ).encode("utf-8"),
+                    file_name="bookmaker_comparison.csv",
+                    mime="text/csv",
+                    key="compare_download"
+                )
+
+                st.subheader(
+                    "All Available Selection Paths"
+                )
+
+                st.dataframe(
+                    odds.drop(
+                        columns=["Exchange"]
+                    ),
+                    hide_index=True,
+                    use_container_width=True
+                )
+
+                st.download_button(
+                    "Download Selection Paths",
+                    odds.to_csv(
+                        index=False
+                    ).encode("utf-8"),
+                    file_name="bookmaker_paths.csv",
+                    mime="text/csv",
+                    key="compare_paths_download"
+                )
+
+                with st.expander(
+                    "Inspect raw bookmaker response"
+                ):
+                    st.json(payload)
+
+                st.warning(
+                    "Candidate mappings are unverified. "
+                    "Effective odds assume commission "
+                    "only on Exchange winnings. "
+                    "Prices may be stale or unavailable "
+                    "when placing a bet. No value "
+                    "signals are generated."
+                )
+
+        except (
+            requests.RequestException,
+            ValueError,
+            TypeError,
+            KeyError
+        ) as e:
+            st.error(
+                f"Comparison failed: {e}"
+            )
