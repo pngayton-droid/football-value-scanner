@@ -285,3 +285,34 @@ if st.button("Test Live xG", key="live_xg_endpoint_test"):
 
     except requests.RequestException as e:
         st.error(str(e))
+
+st.subheader("Historical xG Test")
+
+if st.button("Test Historical xG", key="historical_xg_test"):
+    match_id = "mt_156097404"
+
+    url = (
+        "https://api.thestatsapi.com"
+        f"/api/football/matches/{match_id}/stats"
+    )
+
+    headers = {
+        "Authorization": f"Bearer {st.secrets['STATS_API_KEY']}"
+    }
+
+    try:
+        response = requests.get(
+            url,
+            headers=headers,
+            timeout=20
+        )
+
+        st.write("HTTP status:", response.status_code)
+
+        if response.ok:
+            st.json(response.json())
+        else:
+            st.write(response.text[:1000])
+
+    except requests.RequestException as e:
+        st.error(f"Historical xG test failed: {e}")
