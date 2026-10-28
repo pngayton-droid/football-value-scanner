@@ -232,7 +232,7 @@ if st.button("Test Live xG"):
 
 st.subheader("Live xG Endpoint Test")
 
-if st.button("Test Live xG"):
+if st.button("Test Live xG", key="live_xg_endpoint_test"):
     match_id = "mt_156097404"
     url = f"https://api.thestatsapi.com/api/football/matches/{match_id}/live-stats"
 
