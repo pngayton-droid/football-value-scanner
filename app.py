@@ -1228,3 +1228,402 @@ if diag_matches:
                 TypeError
             ) as e:
                 st.error(f"{endpoint} failed: {e}")
+
+# 18-MARKET LIVE ODDS MAPPING TEST
+
+st.divider()
+st.header("🎯 18-Market Odds Mapping Test")
+
+st.caption(
+    "Checks which historical betting markets can be matched "
+    "to actual live bookmaker market definitions. "
+    "No value signals are generated here."
+)
+
+MAP_BASE = "https://api.thestatsapi.com/api/football/matches"
+
+HISTORICAL_MARKETS_18 = {
+    "Home full-time win": ("match_odds", "home"),
+    "Draw full-time": ("match_odds", "draw"),
+    "Away full-time win": ("match_odds", "away"),
+    "Home scores in 2H": (None, None),
+    "Away scores in 2H": (None, None),
+    "Over 0.5 goals 2H": (None, None),
+    "Over 1.5 goals 2H": (None, None),
+    "Over 2.5 goals 2H": (None, None),
+    "Home wins 2H": ("second_half_result", "home"),
+    "Draw 2H": ("second_half_result", "draw"),
+    "Away wins 2H": ("second_half_result", "away"),
+    "BTTS Yes FT": ("btts", "yes"),
+    "Over 1.5 goals FT": ("total_goals", "over_1.5"),
+    "Under 1.5 goals FT": ("total_goals", "under_1.5"),
+    "Over 2.5 goals FT": ("total_goals", "over_2.5"),
+    "Under 2.5 goals FT": ("total_goals", "under_2.5"),
+    "Over 3.5 goals FT": ("total_goals", "over_3.5"),
+    "Under 3.5 goals FT": ("total_goals", "under_3.5"),
+}
+
+def map_request(url, params=None):
+    response = requests.get(
+        url,
+        headers={
+            "Authorization": (
+                f"Bearer {st.secrets['STATS_API_KEY']}"
+            )
+        },
+        params=params,
+        timeout=25
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def map_normalize(value):
+    return (
+        str(value)
+        .lower()
+        .replace(" ", "_")
+        .replace("-", "_")
+        .replace(".", "_")
+        .strip("_")
+    )
+
+
+def map_find_nodes(obj, path=()):
+    """
+    Walk through the actual odds response without
+    assuming every bookmaker uses the same nesting.
+    """
+    if isinstance(obj, dict):
+        if (
+            "available_to_back" in obj
+            or "available_to_lay" in obj
+            or "live" in obj
+        ):
+            yield path, obj
+
+        for key, value in obj.items():
+            if isinstance(value, (dict, list)):
+                yield from map_find_nodes(
+                    value, path + (str(key),)
+                )
+
+    elif isinstance(obj, list):
+        for index, value in enumerate(obj):
+            yield from map_find_nodes(
+                value, path + (str(index),)
+            )
+
+
+def map_best_back(node):
+    offers = node.get("available_to_back") or []
+
+    valid = []
+
+    if isinstance(offers, list):
+        for offer in offers:
+            if not isinstance(offer, dict):
+                continue
+
+            try:
+                price = float(offer["price"])
+                size = float(offer.get("size", 0))
+
+                if (
+                    math.isfinite(price)
+                    and math.isfinite(size)
+                    and price > 1
+                    and size > 0
+                ):
+                    valid.append((price, size))
+
+            except (TypeError, ValueError, KeyError):
+                pass
+
+    if valid:
+        return max(valid, key=lambda item: item[0])
+
+    return None, None
+
+
+if "market_map_matches" not in st.session_state:
+    st.session_state.market_map_matches = []
+
+
+if st.button(
+    "Find Live Matches for Market Test",
+    key="market_map_find"
+):
+    try:
+        payload = map_request(
+            MAP_BASE,
+            params={"status": "live", "per_page": 100}
+        )
+
+        matches = payload.get("data") or []
+
+        if not isinstance(matches, list):
+            st.error("Unexpected match list.")
+        else:
+            st.session_state.market_map_matches = [
+                m for m in matches
+                if isinstance(m, dict) and m.get("id")
+            ]
+
+            st.success(
+                f"Found {len(st.session_state.market_map_matches)} "
+                "live matches."
+            )
+
+    except (
+        requests.RequestException,
+        ValueError,
+        TypeError
+    ) as error:
+        st.error(f"Could not find matches: {error}")
+
+
+map_matches = st.session_state.market_map_matches
+
+if map_matches:
+    choices = {}
+
+    for match in map_matches:
+        home = (
+            match.get("home_team") or {}
+        ).get("name", "Home")
+
+        away = (
+            match.get("away_team") or {}
+        ).get("name", "Away")
+
+        match_id = str(match["id"])
+
+        choices[f"{home} v {away} [{match_id}]"] = match
+
+    chosen = st.selectbox(
+        "Select a live match",
+        list(choices),
+        key="market_map_match"
+    )
+
+    selected_match = choices[chosen]
+    selected_id = str(selected_match["id"])
+
+    if st.button(
+        "Check All 18 Markets",
+        key="market_map_check"
+    ):
+        try:
+            payload = map_request(
+                f"{MAP_BASE}/{selected_id}/odds/live"
+            )
+
+            data = payload.get("data") or {}
+            bookmakers = data.get("bookmakers") or []
+
+            if not isinstance(bookmakers, list):
+                bookmakers = []
+
+            st.write(
+                f"Bookmakers returned: {len(bookmakers)}"
+            )
+
+            all_rows = []
+
+            for bookmaker in bookmakers:
+                if not isinstance(bookmaker, dict):
+                    continue
+
+                bookmaker_name = str(
+                    bookmaker.get("bookmaker", "Unknown")
+                )
+
+                markets = bookmaker.get("markets") or {}
+
+                for path, node in map_find_nodes(markets):
+                    if not path:
+                        continue
+
+                    market_key = map_normalize(path[0])
+                    selection_path = tuple(
+                        map_normalize(part)
+                        for part in path[1:]
+                    )
+
+                    back_price, back_size = map_best_back(node)
+
+                    all_rows.append({
+                        "Bookmaker": bookmaker_name,
+                        "Market key": market_key,
+                        "Selection path": "/".join(
+                            selection_path
+                        ),
+                        "Back price": back_price,
+                        "Back size": back_size,
+                        "Raw node": node
+                    })
+
+            odds_df = pd.DataFrame(all_rows)
+
+            if odds_df.empty:
+                st.warning(
+                    "No recognisable odds nodes were found. "
+                    "Inspect the raw response below."
+                )
+            else:
+                st.subheader("Market Mapping Results")
+
+                results = []
+
+                for historical_name, mapping in (
+                    HISTORICAL_MARKETS_18.items()
+                ):
+                    target_market, target_selection = mapping
+
+                    if target_market is None:
+                        results.append({
+                            "Historical market": historical_name,
+                            "Status": "Needs mapping",
+                            "Matching nodes": 0,
+                            "Betfair back": None,
+                            "Back size": None
+                        })
+                        continue
+
+                    candidates = odds_df[
+                        odds_df["Market key"].eq(
+                            target_market
+                        )
+                    ].copy()
+
+                    candidates = candidates[
+                        candidates["Selection path"].eq(
+                            target_selection
+                        )
+                    ]
+
+                    betfair = candidates[
+                        candidates["Bookmaker"]
+                        .str.lower()
+                        .str.contains(
+                            "betfair exchange",
+                            regex=False,
+                            na=False
+                        )
+                    ]
+
+                    betfair = betfair.dropna(
+                        subset=["Back price"]
+                    )
+
+                    if not betfair.empty:
+                        best = betfair.sort_values(
+                            "Back price",
+                            ascending=False
+                        ).iloc[0]
+
+                        price = best["Back price"]
+                        size = best["Back size"]
+
+                    else:
+                        price = None
+                        size = None
+
+                    results.append({
+                        "Historical market": historical_name,
+                        "Status": (
+                            "Candidate found - verify"
+                            if not candidates.empty
+                            else "Not found"
+                        ),
+                        "Matching nodes": len(candidates),
+                        "Betfair back": price,
+                        "Back size": size
+                    })
+
+                result_df = pd.DataFrame(results)
+
+                st.dataframe(
+                    result_df,
+                    hide_index=True,
+                    use_container_width=True
+                )
+
+                st.download_button(
+                    "Download 18-Market Mapping",
+                    result_df.to_csv(
+                        index=False
+                    ).encode("utf-8"),
+                    file_name="18_market_mapping.csv",
+                    mime="text/csv",
+                    key="market_map_download"
+                )
+
+                st.subheader("Available Market Names")
+
+                market_summary = (
+                    odds_df.groupby(
+                        "Market key",
+                        as_index=False
+                    )
+                    .agg(
+                        Selections=("Selection path", "nunique"),
+                        Bookmakers=("Bookmaker", "nunique")
+                    )
+                    .sort_values("Market key")
+                )
+
+                st.dataframe(
+                    market_summary,
+                    hide_index=True,
+                    use_container_width=True
+                )
+
+                with st.expander(
+                    "Inspect all selection paths"
+                ):
+                    st.dataframe(
+                        odds_df[
+                            [
+                                "Bookmaker",
+                                "Market key",
+                                "Selection path",
+                                "Back price",
+                                "Back size"
+                            ]
+                        ],
+                        hide_index=True,
+                        use_container_width=True
+                    )
+
+                st.download_button(
+                    "Download All Odds Paths",
+                    odds_df.drop(
+                        columns=["Raw node"]
+                    ).to_csv(
+                        index=False
+                    ).encode("utf-8"),
+                    file_name="live_market_paths.csv",
+                    mime="text/csv",
+                    key="market_paths_download"
+                )
+
+            with st.expander(
+                "Inspect original API odds response"
+            ):
+                st.json(payload)
+
+            st.info(
+                "These are candidate mappings, not "
+                "verified market definitions. "
+                "No betting value has been calculated."
+            )
+
+        except (
+            requests.RequestException,
+            ValueError,
+            TypeError,
+            KeyError
+        ) as error:
+            st.error(f"Market mapping failed: {error}")
