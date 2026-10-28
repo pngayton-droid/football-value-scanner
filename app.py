@@ -215,9 +215,9 @@ if match.get("xg_available"):
 
         except requests.RequestException as e:
             st.error(f"Live stats error: {e}")
-else:
-    st.caption("xG not available for this match")
 
+                    else:
+                        st.caption("xG not available for this match")
 
     except requests.RequestException as e:
         st.error(f"Unable to load live matches: {e}")
