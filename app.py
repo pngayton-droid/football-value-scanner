@@ -141,6 +141,7 @@ st.caption("Checks paginated live matches for halftime, xG, opening prices and b
 MAX_LIVE_PAGES = st.slider("Maximum live fixture pages to check", 1, 10, 3, help="Each page is one API request (up to 100 matches). Increase only when needed on busy matchdays.")
 SCAN_SCOPE = st.radio("Competition coverage", ["All leagues (recommended)", "Priorities 1–3 only", "Priority 1 only"], horizontal=True, help="All leagues keeps maximum coverage; priority tiers determine display order. Unknown competition names are never silently classified as major leagues.")
 st.caption("Priorities affect display and optional filtering only. Fixture pages are collected before filtering; a page limit can still cause incomplete coverage.")
+AUTO_COMPETITION_LOOKUP = st.checkbox('Resolve missing competition names during scan (up to 8 extra API requests)', value=True, help='Only one match-detail request per new competition ID. Names are cached in this Streamlit session; a restart clears the cache.')
 
 # Display classification uses league/country text only, not unverified provider IDs.
 # The provider's actual competition fields are shown in diagnostics below.
@@ -238,8 +239,20 @@ def competition_priority(match):
     # Continental competitions don't have a single country.
     if any(normalise_label(term) in n for term in PRIORITY_THREE):
         return 3, 'Priority 3 — continental/cup'
-    # If country is missing, don't guess based on generic league names.
+    # If country is missing, classify only distinctive names whose competition is unambiguous.
+    # Generic labels such as 'Premier League', 'Championship' or 'Bundesliga'
+    # remain unclassified until the provider supplies a country.
     if not c:
+        distinctive = {
+            'la liga': 1, 'laliga': 1, 'eredivisie': 1, 'primeira liga': 1,
+            'liga portugal': 1, 'ligue 1': 1, 'ligue 2': 2,
+            'eliteserien': 2, 'allsvenskan': 2, 'eerste divisie': 2,
+            'copa del rey': 3, 'coppa italia': 3, 'dfb pokal': 3,
+            'puchar polski': 3, 'turkiye kupasi': 3, 'turkiye kupas': 3,
+        }
+        tier = distinctive.get(n)
+        if tier:
+            return tier, f'Priority {tier} — name only (country unverified)'
         return 4, 'Unclassified — missing country'
     for country_key, names in PRIORITY_TWO.items():
         if normalise_label(country_key) in c and any(normalise_label(term) == n for term in names):
@@ -365,11 +378,11 @@ def resolve_competitions_from_match_details(matches, limit=8):
             name, country = _usable_competition_metadata(data)
             if not name and isinstance(data.get('match'), dict):
                 name, country = _usable_competition_metadata(data['match'])
-            if name and country:
+            if name:
                 known[ident] = {'name': name, 'country': country}
-                report.append({'Competition ID': ident, 'Result': 'Resolved from provider', 'Name': f'{name} ({country})'})
+                report.append({'Competition ID': ident, 'Result': 'Name resolved' if not country else 'Name and country resolved', 'Name': f'{name} ({country})' if country else name})
             else:
-                report.append({'Competition ID': ident, 'Result': 'Name or country missing', 'Name': name})
+                report.append({'Competition ID': ident, 'Result': 'Competition name missing', 'Name': ''})
         except requests.RequestException as exc:
             report.append({'Competition ID': ident, 'Result': f'Match detail unavailable ({getattr(getattr(exc, "response", None), "status_code", "request error")})', 'Name': ''})
         except (ValueError, TypeError, KeyError):
@@ -495,7 +508,7 @@ if st.button('Test competition-name lookup (up to 8 requests)', key='competition
             st.dataframe(pd.DataFrame(_lookup_report), hide_index=True, use_container_width=True)
         else:
             st.info('No new competition IDs to test. Previously resolved names are retained for this session.')
-        st.caption(f"Resolved competition IDs in this session: {len(st.session_state.get('verified_competition_metadata', {}))}")
+        st.caption(f"Cached competition names in this session: {len(st.session_state.get('verified_competition_metadata', {}))}")
     except (requests.RequestException, ValueError, TypeError, KeyError) as exc:
         st.warning(f'Lookup could not complete: {exc}')
 
@@ -506,6 +519,11 @@ if st.button("🔍 Run Complete Halftime Scan", key="clean_ht_scan"):
         st.session_state['research_live_quotes'] = {}
         st.session_state['auto_estimates'] = {}
         all_matches = live_matches()
+        if AUTO_COMPETITION_LOOKUP:
+            _new_lookup = resolve_competitions_from_match_details(all_matches, limit=8)
+            if _new_lookup:
+                st.caption(f'Competition metadata lookup: {len(_new_lookup)} new IDs checked; {sum("resolved" in r["Result"].lower() for r in _new_lookup)} names found. Up to 8 extra API requests.')
+            all_matches = [enriched_competition_match(m) for m in all_matches]
         matches = selected_matches(all_matches)
         halftime = [m for m in matches if is_halftime(m)]
         st.write(f"Fixture pages actually checked: {st.session_state.get('live_coverage_pages_checked', 'Unknown')}")
@@ -513,6 +531,7 @@ if st.button("🔍 Run Complete Halftime Scan", key="clean_ht_scan"):
         st.write(f"API-reported total pages: {reported if reported is not None else 'Not supplied'}")
         st.write(f"Live matches returned (before filtering): {len(all_matches)}")
         st.write(f"Matches in selected scope: {len(matches)}")
+        st.caption(f"Competition names cached this session: {len(st.session_state.get('verified_competition_metadata', {}))}")
         with st.expander('Competition coverage and priority diagnostics'):
             show_coverage(all_matches)
         st.write(f"Live matches returned: {len(matches)}")
