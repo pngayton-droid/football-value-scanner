@@ -185,6 +185,48 @@ def first_half_xg(payload):
     return None, None
 
 
+
+# Read-only diagnostic: inspect the live-stats fields used for halftime xG.
+# Does not change the filtering, fair odds, or live scanner behaviour.
+st.subheader("🧪 Halftime xG diagnostics")
+st.caption("Choose a live match to inspect the provider's status and expected-goals fields. No API key is displayed.")
+if st.button("Find matches for xG diagnostics", key="xg_diag_find"):
+    try:
+        st.session_state["xg_diag_matches"] = live_matches()
+    except (requests.RequestException, ValueError, KeyError) as exc:
+        st.error(f"Could not retrieve live matches: {exc}")
+
+_diag_matches = st.session_state.get("xg_diag_matches", [])
+if _diag_matches:
+    _diag_choices = {f"{match_name(m)} [{m['id']}]": m for m in _diag_matches}
+    _diag_selected = st.selectbox("Match to inspect", list(_diag_choices), key="xg_diag_match")
+    if st.button("Inspect halftime xG response", key="xg_diag_inspect"):
+        _diag_match = _diag_choices[_diag_selected]
+        try:
+            _diag_response = api_get(f"/{_diag_match['id']}/live-stats")
+            _diag_data = _diag_response.get("data") or {}
+            _diag_meta = _diag_data.get("meta") or {}
+            _diag_stats = _diag_data.get("stats") or {}
+            _diag_xg = _diag_stats.get("expected_goals")
+            _diag_values = (_diag_xg or {}).get("all") if isinstance(_diag_xg, dict) else None
+            _diag_h, _diag_a = first_half_xg(_diag_response)
+            st.json({
+                "match": match_name(_diag_match),
+                "list_live_status": (_diag_match.get("live") or {}).get("match_status"),
+                "stats_meta": _diag_meta,
+                "stats_available_keys": list(_diag_stats.keys()),
+                "expected_goals_raw": _diag_xg,
+                "expected_goals_all": _diag_values,
+                "accepted_halftime_xg": {"home": _diag_h, "away": _diag_a},
+            })
+            if _diag_h is None or _diag_a is None:
+                st.warning("xG was not accepted. Compare stats_meta.match_status with expected_goals_raw to see whether the status or the values are missing.")
+            else:
+                st.success("Halftime xG successfully extracted.")
+        except (requests.RequestException, ValueError, TypeError, KeyError) as exc:
+            st.error(f"Live-stats diagnostic failed: {exc}")
+
+
 def positive_odds(value):
     try:
         value = float(value)
