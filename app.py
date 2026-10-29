@@ -136,7 +136,8 @@ st.caption('Markets requiring goal timestamps (next goal), halftime corners/card
 # CLEAN LIVE SCANNER — all API access is on button clicks.
 st.divider()
 st.header("🔎 Automatic Halftime Scanner")
-st.caption("Checks first-page live matches for halftime, xG, opening prices and bookmaker coverage. No automatic betting signals.")
+st.caption("Checks paginated live matches for halftime, xG, opening prices and bookmaker coverage. No automatic betting signals.")
+MAX_LIVE_PAGES = st.slider("Maximum live fixture pages to check", 1, 10, 3, help="Each page is one API request (up to 100 matches). Increase only when needed on busy matchdays.")
 API_BASE = "https://api.thestatsapi.com/api/football/matches"
 HT_STATES = {"ht", "halftime", "half_time", "half-time", "half time", "half_time_break"}
 
@@ -153,10 +154,32 @@ def api_get(path="", params=None):
 
 
 def live_matches():
-    data = api_get(params={"status": "live", "per_page": 100}).get("data") or []
-    if not isinstance(data, list):
-        raise ValueError("Unexpected live match list")
-    return [m for m in data if isinstance(m, dict) and m.get("id")]
+    """Fetch live fixtures across pages; do not silently treat a partial scan as complete."""
+    found = {}
+    total_pages = None
+    for page in range(1, MAX_LIVE_PAGES + 1):
+        payload = api_get(params={"status": "live", "per_page": 100, "page": page})
+        data = payload.get("data")
+        if not isinstance(data, list):
+            raise ValueError(f"Unexpected live match list on page {page}")
+        for match in data:
+            if isinstance(match, dict) and match.get("id"):
+                found[str(match["id"])] = match
+        meta = payload.get("meta") or {}
+        if total_pages is None:
+            try:
+                total_pages = int(meta["total_pages"])
+            except (KeyError, TypeError, ValueError):
+                total_pages = None
+        if total_pages is not None and page >= total_pages:
+            break
+        if len(data) < 100:
+            break
+    if total_pages is not None and total_pages > MAX_LIVE_PAGES:
+        st.warning(f"Partial fixture scan: API reports {total_pages} pages, but the limit is {MAX_LIVE_PAGES}. Increase the limit to cover every match.")
+    elif total_pages is None and len(data) == 100 and page == MAX_LIVE_PAGES:
+        st.warning("Fixture scan may be incomplete: last page was full and the API supplied no usable total_pages value.")
+    return list(found.values())
 
 
 def is_halftime(match):
@@ -273,10 +296,8 @@ if st.button("🔍 Run Complete Halftime Scan", key="clean_ht_scan"):
         halftime = [m for m in matches if is_halftime(m)]
         st.write(f"Live matches returned: {len(matches)}")
         st.write(f"Halftime matches detected: {len(halftime)}")
-        if len(matches) == 100:
-            st.warning("Only the first 100 live matches were checked; additional pages may exist.")
         if not halftime:
-            st.info("No halftime matches detected in the returned page. Try again during live fixtures.")
+            st.info("No halftime matches detected in the checked fixture pages. Try again during live fixtures.")
             with st.expander("Inspect status labels"):
                 for m in matches[:15]:
                     st.write({"Match": match_name(m), "live": m.get("live")})
