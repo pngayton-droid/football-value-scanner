@@ -186,6 +186,116 @@ def historical_estimates(sample):
     return pd.DataFrame(estimates)
 
 
+
+# Stage 12: out-of-sample matching-method comparison (research only).
+# Training matches are strictly earlier than the test period; no model settings are
+# selected from the test period and then used to claim an unbiased final performance.
+def stage12_validation(history, max_test=600):
+    import numpy as np
+    date_col = next((c for c in ('Date', 'date', 'match_date', 'MatchDate') if c in history.columns), None)
+    if date_col is None:
+        return None, 'No historical match-date column found; chronological validation cannot run safely.'
+    dates = pd.to_datetime(history[date_col], errors='coerce', dayfirst=True)
+    dated = history.loc[dates.notna()].copy()
+    dated['_validation_date'] = dates.loc[dates.notna()]
+    dated = dated.sort_values('_validation_date')
+    if len(dated) < 1000:
+        return None, 'Too few dated matches for meaningful chronological validation.'
+    split = int(len(dated) * 0.8)
+    train, test = dated.iloc[:split], dated.iloc[split:]
+    # Same-date fixtures cannot appear on both sides of the cutoff.
+    cutoff = test['_validation_date'].iloc[0]
+    train = train[train['_validation_date'] < cutoff]
+    test = test[test['_validation_date'] >= cutoff]
+    if len(train) < 500 or len(test) < 100:
+        return None, 'Insufficient clean training and test matches after date separation.'
+    if len(test) > max_test:
+        indices = np.linspace(0, len(test)-1, max_test, dtype=int)
+        test = test.iloc[indices]
+    features = ['HTHG', 'HTAG', 'fav', xg1, xg2]
+    tr = train[features].to_numpy(dtype=float)
+    te = test[features].to_numpy(dtype=float)
+    tr_homefav = (train['B365H'].to_numpy(float) < train['B365A'].to_numpy(float))
+    te_homefav = (test['B365H'].to_numpy(float) < test['B365A'].to_numpy(float))
+    train_outcomes = market_outcomes(train)
+    test_outcomes = market_outcomes(test)
+    candidates = [
+        ('Original exact score', .40, .35, 'exact', False),
+        ('Wider xG +0.10', .50, .35, 'exact', False),
+        ('Wider odds +0.15', .40, .50, 'exact', False),
+        ('Both modestly wider', .50, .50, 'exact', False),
+        ('Original + same favourite side', .40, .35, 'exact', True),
+        ('Wider + same favourite side', .50, .50, 'exact', True),
+        ('Same goal difference and total', .40, .35, 'goal_profile', False),
+    ]
+    # Note: goal-profile is equivalent to exact score mathematically; omit it.
+    candidates = candidates[:-1]
+    tr_y={k:v.to_numpy(dtype=float) for k,v in train_outcomes.items()}
+    te_y={k:v.to_numpy(dtype=float) for k,v in test_outcomes.items()}
+    results=[]
+    for label, xwidth, owidth, score_type, side in candidates:
+        estimates = {k: [] for k in train_outcomes}
+        truths = {k: [] for k in train_outcomes}
+        sizes=[]
+        for i, row in enumerate(te):
+            mask = ((tr[:,0] == row[0]) & (tr[:,1] == row[1])
+                    & (abs(tr[:,2] - row[2]) <= owidth)
+                    & (abs(tr[:,3] - row[3]) <= xwidth)
+                    & (abs(tr[:,4] - row[4]) <= xwidth))
+            if side:
+                mask &= (tr_homefav == te_homefav[i])
+            n=int(mask.sum())
+            if n < 30: continue
+            sizes.append(n)
+            for k in estimates:
+                y=tr_y[k][mask]
+                # Laplace smoothing reduces overconfident estimates from small samples.
+                estimates[k].append((float(y.sum())+1)/(n+2))
+                truths[k].append(float(te_y[k][i]))
+        for k in estimates:
+            n=len(estimates[k])
+            if n < 100: continue
+            pred=np.asarray(estimates[k]); actual=np.asarray(truths[k])
+            brier=float(np.mean((pred-actual)**2))
+            # Baseline uses the training period's unconditional market frequency.
+            base=(float(train_outcomes[k].sum())+1)/(len(train)+2)
+            base_brier=float(np.mean((base-actual)**2))
+            results.append({'Market':k,'Matching method':label,
+                'Test predictions':n,'Average sample':round(float(np.mean(sizes)),1),
+                'Brier score (lower better)':round(brier,5),
+                'Simple baseline Brier':round(base_brier,5),
+                'Improvement vs baseline':round(base_brier-brier,5),
+                'Test start':str(cutoff.date()),
+                'Train matches':len(train),'Test matches evaluated':len(test)})
+    return pd.DataFrame(results), None
+
+st.subheader('Stage 12 · Historical matching accuracy laboratory')
+st.caption('Chronological holdout experiment. This does not change the live scanner or opportunity tracker.')
+with st.expander('Compare matching methods on later, unseen matches'):
+    st.write('We compare the original filters, slightly wider filters and same-side favourite filters. '
+             'Each method predicts later matches using earlier matches only. '
+             'Lower Brier score means better probability accuracy; this is not proof of betting profit.')
+    if st.button('Run Stage 12 validation', key='stage12_run'):
+        with st.spinner('Testing historical matching methods…'):
+            validation, error = stage12_validation(HISTORY)
+        if error:
+            st.error(error)
+        elif validation.empty:
+            st.warning('No methods produced at least 100 test predictions with 30+ comparable training matches. '
+                       'We need more data or a different validation design.')
+        else:
+            st.session_state['stage12_validation'] = validation
+    if 'stage12_validation' in st.session_state:
+        validation=st.session_state['stage12_validation']
+        st.dataframe(validation, hide_index=True, use_container_width=True)
+        st.download_button('Download Stage 12 validation CSV',
+            validation.to_csv(index=False).encode('utf-8'),
+            'stage12_holdout_validation.csv', 'text/csv')
+        st.warning('Research-only: methods were compared on the same holdout. Selecting the best '
+                   'after seeing results requires another untouched test period. '
+                   'Missing historical odds, league effects, market correlations and data quality '
+                   'remain limitations. A positive Brier improvement does not establish positive ROI.')
+
 st.subheader('Stage 11 · Historical sample quality laboratory')
 with st.expander('Inspect filter losses and safer sample-width experiments'):
     show_stage11_diagnostics(ht_h, ht_a, fav, xgh, xga, xg_width, odds_width)
