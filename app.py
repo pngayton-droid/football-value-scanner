@@ -6,7 +6,7 @@ import streamlit as st
 import requests
 st.set_page_config(page_title='Football Value Scanner',layout='wide')
 st.title('Football Value Scanner · Research prototype')
-st.caption('Historical comparison only. No live feeds, executable bets or verified real-time odds. Prices are entered manually.')
+st.caption('Historical research and live-data diagnostics. API odds may be stale; no bets are placed.')
 DATA=Path(__file__).parent/'football_merged_32653.csv'
 @st.cache_data(show_spinner='Loading historical matches…')
 def load_data():
@@ -71,7 +71,7 @@ markets={
 st.subheader(f'{home} v {away} · HT {ht_h}–{ht_a}')
 a,b,c=st.columns(3)
 a.metric('Comparable matches',f'{len(d):,}')
-b.metric('Historical data', '32,653 matches')
+b.metric('Historical data', '32,653 matches (source file)')
 c.metric('Market types',len(markets))
 st.warning('Screening estimates only: these historical matches are not a calibrated predictive model. Overlapping markets, odds selection and out-of-sample validation matter.')
 st.markdown('**Enter available Betfair back prices for the markets you want to check.** Leave other prices at zero.')
@@ -95,2273 +95,286 @@ st.caption('Markets requiring goal timestamps (next goal), halftime corners/card
 
 
 
-# TheStatsAPI connection test
-st.subheader("⚽ TheStatsAPI Connection Test")
 
-if st.button("Test TheStatsAPI"):
-    import requests
 
-    url = "https://api.thestatsapi.com/api/football/matches"
-
-    headers = {
-        "Authorization": f"Bearer {st.secrets['STATS_API_KEY']}"
-    }
-
-    params = {
-        "status": "scheduled",
-        "per_page": 5
-    }
-
-    try:
-        response = requests.get(
-            url,
-            headers=headers,
-            params=params,
-            timeout=20
-        )
-
-        st.write("HTTP status:", response.status_code)
-
-        if response.ok:
-            st.success("Connection successful!")
-            st.json(response.json())
-        else:
-            st.error("API request failed")
-            st.write(response.text[:1000])
-
-    except requests.RequestException as e:
-        st.error(f"Connection error: {e}")
-
-
-# THESTATSAPI LIVE MATCH DASHBOARD
-st.divider()
-st.header("⚽ Live Football Dashboard")
-
-if st.button("Refresh Live Matches"):
-    try:
-        url = "https://api.thestatsapi.com/api/football/matches"
-
-        headers = {
-            "Authorization": f"Bearer {st.secrets['STATS_API_KEY']}"
-        }
-
-        response = requests.get(
-            url,
-            headers=headers,
-            params={"status": "live", "per_page": 100},
-            timeout=20
-        )
-        response.raise_for_status()
-
-        payload = response.json()
-        matches = payload.get("data", [])
-
-        if not isinstance(matches, list):
-            st.error("Unexpected API response format.")
-
-        elif not matches:
-            st.info("No live matches found.")
-
-        else:
-            st.success(f"Found {len(matches)} live matches")
-
-            for match in matches:
-                home = match.get("home_team") or {}
-                away = match.get("away_team") or {}
-                score = match.get("score") or {}
-                live = match.get("live") or {}
-
-                home_name = home.get("name", "Home")
-                away_name = away.get("name", "Away")
-
-                home_goals = score.get("home")
-                away_goals = score.get("away")
-
-                home_goals = "-" if home_goals is None else home_goals
-                away_goals = "-" if away_goals is None else away_goals
-
-                minute = live.get("elapsed_minutes")
-                minute_text = f"{minute}'" if minute is not None else "—"
-
-                with st.container(border=True):
-                    st.subheader(f"{home_name} v {away_name}")
-                    st.write(
-                        f"**{home_goals} – {away_goals}** "
-                        f"· {minute_text}"
-                    )
-
-                    if match.get("xg_available"):
-                        st.success("xG available")
-
-                        match_id = match.get("id")
-
-                        if match_id:
-                            stats_url = (
-                                "https://api.thestatsapi.com"
-                                f"/api/football/matches/{match_id}/live-stats"
-                            )
-
-                            try:
-                                stats_response = requests.get(
-                                    stats_url,
-                                    headers=headers,
-                                    timeout=20
-                                )
-
-                                st.write(
-                                    "Live stats HTTP:",
-                                    stats_response.status_code
-                                )
-
-                                if stats_response.ok:
-                                    st.json(stats_response.json())
-                                else:
-                                    st.write(stats_response.text[:500])
-
-                            except requests.RequestException as e:
-                                st.error(f"Live stats error: {e}")
-
-                    else:
-                        st.caption("xG not available for this match")
-
-    except requests.RequestException as e:
-        st.error(f"Unable to load live matches: {e}")
-
-    except (KeyError, ValueError, TypeError) as e:
-        st.error(f"Unable to process match data: {e}")
-
-
-# Test live xG for a specific match
-st.subheader("⚽ Live xG Test")
-
-if st.button("Test Live xG"):
-    import requests
-
-    match_id = "mt_156097404"
-    url = (
-        "https://api.thestatsapi.com"
-        f"/api/football/matches/{match_id}"
-    )
-
-    headers = {
-        "Authorization": f"Bearer {st.secrets['STATS_API_KEY']}"
-    }
-
-    try:
-        response = requests.get(
-            url, headers=headers, timeout=20
-        )
-
-        st.write("HTTP status:", response.status_code)
-
-        if response.ok:
-            st.json(response.json())
-        else:
-            st.write(response.text[:1000])
-
-    except requests.RequestException as e:
-        st.error(str(e))
-
-
-
-st.subheader("Live xG Endpoint Test")
-
-if st.button("Test Live xG", key="live_xg_endpoint_test"):
-    match_id = "mt_156097404"
-    url = f"https://api.thestatsapi.com/api/football/matches/{match_id}/live-stats"
-
-    headers = {
-        "Authorization": f"Bearer {st.secrets['STATS_API_KEY']}"
-    }
-
-    try:
-        response = requests.get(url, headers=headers, timeout=20)
-        st.write("HTTP status:", response.status_code)
-
-        if response.ok:
-            st.json(response.json())
-        else:
-            st.write(response.text[:1000])
-
-    except requests.RequestException as e:
-        st.error(str(e))
-
-st.subheader("Historical xG Test")
-
-if st.button("Test Historical xG", key="historical_xg_test"):
-    match_id = "mt_156097404"
-
-    url = (
-        "https://api.thestatsapi.com"
-        f"/api/football/matches/{match_id}/stats"
-    )
-
-    headers = {
-        "Authorization": f"Bearer {st.secrets['STATS_API_KEY']}"
-    }
-
-    try:
-        response = requests.get(
-            url,
-            headers=headers,
-            timeout=20
-        )
-
-        st.write("HTTP status:", response.status_code)
-
-        if response.ok:
-            st.json(response.json())
-        else:
-            st.write(response.text[:1000])
-
-    except requests.RequestException as e:
-        st.error(f"Historical xG test failed: {e}")
-
-
-
-# HISTORICAL STATISTICS COVERAGE TEST
-
-st.divider()
-st.header("⚽ Historical Data Coverage Test")
-
-if st.button("Check Historical Data Coverage"):
-    import pandas as pd
-
-    base_url = "https://api.thestatsapi.com/api/football/matches"
-    headers = {
-        "Authorization": f"Bearer {st.secrets['STATS_API_KEY']}"
-    }
-
-    def show_value(value):
-        if value is None:
-            return "Not available"
-        if isinstance(value, dict):
-            return str(value)
-        return value
-
-    try:
-        response = requests.get(
-            base_url,
-            headers=headers,
-            params={
-                "status": "finished",
-                "per_page": 10
-            },
-            timeout=20
-        )
-
-        st.write("Match search HTTP:", response.status_code)
-
-        if not response.ok:
-            st.write(response.text[:1000])
-
-        else:
-            matches = response.json().get("data", [])
-            results = []
-
-            for match in matches[:10]:
-                match_id = match.get("id")
-
-                if not match_id:
-                    continue
-
-                home = (match.get("home_team") or {}).get(
-                    "name", "Home"
-                )
-                away = (match.get("away_team") or {}).get(
-                    "name", "Away"
-                )
-
-                stats_url = f"{base_url}/{match_id}/stats"
-
-                try:
-                    stats_response = requests.get(
-                        stats_url,
-                        headers=headers,
-                        timeout=20
-                    )
-
-                    if not stats_response.ok:
-                        results.append({
-                            "Match": f"{home} v {away}",
-                            "HTTP": stats_response.status_code,
-                            "xG": "Unavailable",
-                            "First-half xG": "Unavailable"
-                        })
-                        continue
-
-                    data = stats_response.json().get("data") or {}
-                    overview = data.get("overview") or {}
-
-                    xg = overview.get("expected_goals")
-
-                    first_half_xg = None
-
-                    if isinstance(xg, dict):
-                        first_half_xg = xg.get("first_half")
-
-                    results.append({
-                        "Match": f"{home} v {away}",
-                        "HTTP": stats_response.status_code,
-                        "xG": show_value(xg),
-                        "First-half xG": show_value(first_half_xg)
-                    })
-
-                except requests.RequestException as e:
-                    st.warning(f"{match_id}: {e}")
-
-            if results:
-                st.dataframe(
-                    pd.DataFrame(results),
-                    use_container_width=True,
-                    hide_index=True
-                )
-
-    except requests.RequestException as e:
-        st.error(f"Coverage test failed: {e}")
-
-
-
-# LIVE BOOKMAKER ODDS COMPARISON AND BETFAIR MONITOR
-
-st.divider()
-st.header("💷 Live Odds & Betfair Market Monitor")
-st.caption(
-    "Research only. API quotes may be delayed, stale or suspended. "
-    "Displayed liquidity is not guaranteed to be executable."
-)
-
-ODDS_BASE = "https://api.thestatsapi.com/api/football/matches"
-
-if "odds_matches" not in st.session_state:
-    st.session_state.odds_matches = []
-
-if "odds_payload" not in st.session_state:
-    st.session_state.odds_payload = None
-
-if "odds_match_id" not in st.session_state:
-    st.session_state.odds_match_id = None
-
-
-def get_odds_headers():
-    return {
-        "Authorization": f"Bearer {st.secrets['STATS_API_KEY']}"
-    }
-
-
-def flatten_market_prices(node, path, bookmaker, rows):
-    if not isinstance(node, dict):
-        return
-
-    if "live" in node:
-        try:
-            price = float(node["live"])
-        except (TypeError, ValueError):
-            return
-
-        if price > 1:
-            rows.append({
-                "Market": " / ".join(path),
-                "Bookmaker": bookmaker,
-                "Back price": price
-            })
-        return
-
-    for key, value in node.items():
-        flatten_market_prices(
-            value,
-            path + [str(key)],
-            bookmaker,
-            rows
-        )
-
-
-def flatten_betfair(node, path, rows):
-    if not isinstance(node, dict):
-        return
-
-    if (
-        "available_to_back" in node
-        or "available_to_lay" in node
-    ):
-        backs = node.get("available_to_back") or []
-        lays = node.get("available_to_lay") or []
-
-        def best_offer(offers, reverse):
-            valid = []
-
-            for offer in offers:
-                if not isinstance(offer, dict):
-                    continue
-
-                try:
-                    price = float(offer.get("price"))
-                    size = float(offer.get("size"))
-                except (TypeError, ValueError):
-                    continue
-
-                if price > 1 and size > 0:
-                    valid.append((price, size))
-
-            if not valid:
-                return None, None
-
-            valid.sort(
-                key=lambda item: item[0],
-                reverse=reverse
-            )
-            return valid[0]
-
-        back, back_size = best_offer(backs, True)
-        lay, lay_size = best_offer(lays, False)
-
-        spread = (
-            round(lay - back, 3)
-            if back is not None and lay is not None
-            else None
-        )
-
-        rows.append({
-            "Market": " / ".join(path),
-            "Best back": back,
-            "Back liquidity": back_size,
-            "Best lay": lay,
-            "Lay liquidity": lay_size,
-            "Spread": spread
-        })
-        return
-
-    for key, value in node.items():
-        flatten_betfair(
-            value,
-            path + [str(key)],
-            rows
-        )
-
-
-if st.button("Find Live Matches", key="find_odds_matches"):
-    try:
-        response = requests.get(
-            ODDS_BASE,
-            headers=get_odds_headers(),
-            params={"status": "live", "per_page": 100},
-            timeout=20
-        )
-        response.raise_for_status()
-
-        matches = response.json().get("data", [])
-
-        if isinstance(matches, list):
-            st.session_state.odds_matches = [
-                m for m in matches
-                if isinstance(m, dict) and m.get("id")
-            ]
-            st.session_state.odds_payload = None
-            st.session_state.odds_match_id = None
-
-            st.success(
-                f"Found {len(st.session_state.odds_matches)} live matches"
-            )
-        else:
-            st.error("Unexpected match list format.")
-
-    except (requests.RequestException, ValueError, KeyError) as e:
-        st.error(f"Match search failed: {e}")
-
-
-matches = st.session_state.odds_matches
-
-if matches:
-    match_options = {}
-
-    for match in matches:
-        home_name = (
-            match.get("home_team") or {}
-        ).get("name", "Home")
-
-        away_name = (
-            match.get("away_team") or {}
-        ).get("name", "Away")
-
-        match_id = str(match["id"])
-
-        label = (
-            f"{home_name} v {away_name} [{match_id}]"
-        )
-
-        match_options[label] = match
-
-    selected_label = st.selectbox(
-        "Choose a live match",
-        list(match_options.keys()),
-        key="odds_match_selection"
-    )
-
-    selected_match = match_options[selected_label]
-    selected_id = str(selected_match["id"])
-
-    st.write(
-        "Live odds available:",
-        selected_match.get("live_odds_available")
-    )
-
-    if st.button("Load Bookmaker Odds", key="load_bookmaker_odds"):
-        try:
-            response = requests.get(
-                f"{ODDS_BASE}/{selected_id}/odds/live",
-                headers=get_odds_headers(),
-                timeout=20
-            )
-
-            st.write("Odds HTTP:", response.status_code)
-
-            if response.ok:
-                st.session_state.odds_payload = response.json()
-                st.session_state.odds_match_id = selected_id
-            else:
-                st.session_state.odds_payload = None
-                st.session_state.odds_match_id = None
-                st.warning("Odds unavailable for this match.")
-                st.code(response.text[:1000])
-
-        except (requests.RequestException, ValueError) as e:
-            st.session_state.odds_payload = None
-            st.session_state.odds_match_id = None
-            st.error(f"Odds request failed: {e}")
-
-    payload = st.session_state.odds_payload
-
-    if (
-        payload is not None
-        and st.session_state.odds_match_id == selected_id
-    ):
-        data = payload.get("data") or {}
-        bookmakers = data.get("bookmakers") or []
-
-        if not isinstance(bookmakers, list):
-            st.error("Unexpected bookmaker response format.")
-
-        elif not bookmakers:
-            st.info("No bookmaker prices returned.")
-
-        else:
-            names = [
-                str(b.get("bookmaker", "Unknown"))
-                for b in bookmakers
-                if isinstance(b, dict)
-            ]
-
-            st.success(
-                f"Bookmakers returned: {', '.join(names)}"
-            )
-
-            all_rows = []
-            betfair_rows = []
-
-            for bookmaker in bookmakers:
-                if not isinstance(bookmaker, dict):
-                    continue
-
-                name = str(
-                    bookmaker.get("bookmaker", "Unknown")
-                )
-                markets = bookmaker.get("markets") or {}
-
-                flatten_market_prices(
-                    markets,
-                    [],
-                    name,
-                    all_rows
-                )
-
-                if "betfair exchange" in name.lower():
-                    flatten_betfair(
-                        markets,
-                        [],
-                        betfair_rows
-                    )
-
-            if all_rows:
-                all_df = pd.DataFrame(all_rows)
-
-                best_idx = all_df.groupby(
-                    "Market"
-                )["Back price"].idxmax()
-
-                best_df = all_df.loc[best_idx].copy()
-                best_df = best_df.sort_values("Market")
-
-                st.subheader("🏆 Best Bookmaker Prices")
-                st.dataframe(
-                    best_df,
-                    hide_index=True,
-                    use_container_width=True
-                )
-
-                with st.expander("All Bookmaker Prices"):
-                    st.dataframe(
-                        all_df,
-                        hide_index=True,
-                        use_container_width=True
-                    )
-
-            st.divider()
-            st.subheader("🟠 Betfair Exchange Monitor")
-
-            if betfair_rows:
-                betfair_df = pd.DataFrame(betfair_rows)
-
-                st.success(
-                    f"Found {len(betfair_df)} Betfair selections"
-                )
-
-                st.dataframe(
-                    betfair_df,
-                    hide_index=True,
-                    use_container_width=True
-                )
-
-                st.download_button(
-                    "Download Betfair Market Data",
-                    betfair_df.to_csv(
-                        index=False
-                    ).encode("utf-8"),
-                    file_name="betfair_market_monitor.csv",
-                    mime="text/csv"
-                )
-
-                st.caption(
-                    "Back and lay prices are separate. "
-                    "Liquidity is the size at the displayed quote. "
-                    "A missing lay price means no lay offer was "
-                    "returned for that selection."
-                )
-
-            else:
-                st.warning(
-                    "No Betfair Exchange order-book data "
-                    "returned for this match."
-                )
-
-            with st.expander("View Original API Response"):
-                st.json(payload)
-
-
-
-
-# AUTOMATIC HALFTIME SCANNER - STAGE 2
-
+# CLEAN LIVE SCANNER — all API access is on button clicks.
 st.divider()
 st.header("🔎 Automatic Halftime Scanner")
-st.caption(
-    "Combines halftime score, first-half xG, "
-    "opening bookmaker odds and live odds coverage. "
-    "Research only — no betting signals."
-)
+st.caption("Checks first-page live matches for halftime, xG, opening prices and bookmaker coverage. No automatic betting signals.")
+API_BASE = "https://api.thestatsapi.com/api/football/matches"
+HT_STATES = {"ht", "halftime", "half_time", "half-time", "half time", "half_time_break"}
 
-SCAN_BASE = "https://api.thestatsapi.com/api/football/matches"
 
-def scan_get(url, params=None):
+def api_get(path="", params=None):
     response = requests.get(
-        url,
-        headers={
-            "Authorization":
-            f"Bearer {st.secrets['STATS_API_KEY']}"
-        },
+        API_BASE + path,
+        headers={"Authorization": f"Bearer {st.secrets['STATS_API_KEY']}"},
         params=params,
-        timeout=20
+        timeout=25,
     )
     response.raise_for_status()
     return response.json()
 
 
-def scan_is_halftime(match):
+def live_matches():
+    data = api_get(params={"status": "live", "per_page": 100}).get("data") or []
+    if not isinstance(data, list):
+        raise ValueError("Unexpected live match list")
+    return [m for m in data if isinstance(m, dict) and m.get("id")]
+
+
+def is_halftime(match):
     live = match.get("live") or {}
     if not isinstance(live, dict):
         live = {}
-
-    values = [
-        match.get("match_status"),
-        match.get("status_short"),
-        live.get("match_status"),
-        live.get("period"),
-        live.get("status")
-    ]
-
-    return any(
-        str(v).strip().lower() in {
-            "ht", "halftime", "half_time",
-            "half-time", "half time"
-        }
-        for v in values if v is not None
-    )
+    fields = [match.get("match_status"), match.get("status_short"),
+              live.get("match_status"), live.get("period"), live.get("status")]
+    return any(str(v).strip().lower() in HT_STATES for v in fields if v is not None)
 
 
-def scan_xg(payload):
+def first_half_xg(payload):
     data = payload.get("data") or {}
     meta = data.get("meta") or {}
-
-    status = str(
-        meta.get("match_status")
-        or meta.get("period")
-        or ""
-    ).strip().lower()
-
-    if status not in {
-        "ht", "halftime", "half_time",
-        "half-time", "half time"
-    }:
+    status = str(meta.get("match_status") or meta.get("period") or "").lower().strip()
+    if status not in HT_STATES:
         return None, None
-
     stats = data.get("stats") or {}
-    expected = stats.get("expected_goals") or {}
-    values = expected.get("all") or {}
-
+    values = (stats.get("expected_goals") or {}).get("all") or {}
     try:
-        home = float(values["home"])
-        away = float(values["away"])
-
-        if all(
-            math.isfinite(v) and v >= 0
-            for v in (home, away)
-        ):
-            return home, away
-    except (KeyError, TypeError, ValueError):
+        h, a = float(values["home"]), float(values["away"])
+        if all(math.isfinite(x) and x >= 0 for x in (h, a)):
+            return h, a
+    except (TypeError, ValueError, KeyError):
         pass
-
     return None, None
 
 
-def scan_opening_favourite(payload):
-    data = payload.get("data") or {}
-    bookmakers = data.get("bookmakers") or []
-
-    valid = []
-
-    for bookmaker in bookmakers:
-        if not isinstance(bookmaker, dict):
-            continue
-
-        markets = bookmaker.get("markets") or {}
-        match_odds = markets.get("match_odds") or {}
-
-        try:
-            home = float(
-                match_odds["home"]["opening"]
-            )
-            away = float(
-                match_odds["away"]["opening"]
-            )
-        except (KeyError, TypeError, ValueError):
-            continue
-
-        if not all(
-            math.isfinite(v) and v > 1
-            for v in (home, away)
-        ):
-            continue
-
-        if home == away:
-            favourite = "Level"
-            price = home
-        elif home < away:
-            favourite = "Home"
-            price = home
-        else:
-            favourite = "Away"
-            price = away
-
-        valid.append({
-            "bookmaker": str(
-                bookmaker.get("bookmaker", "Unknown")
-            ),
-            "favourite": favourite,
-            "price": price
-        })
-
-    if not valid:
-        return "Unknown", None, "Unavailable", 0
-
-    selected = next(
-        (
-            item for item in valid
-            if item["bookmaker"].lower() == "pinnacle"
-        ),
-        valid[0]
-    )
-
-    return (
-        selected["favourite"],
-        selected["price"],
-        selected["bookmaker"],
-        len(valid)
-    )
-
-
-def scan_live_bookmakers(payload):
-    data = payload.get("data") or {}
-    bookmakers = data.get("bookmakers") or []
-
-    names = [
-        str(b.get("bookmaker", "Unknown"))
-        for b in bookmakers
-        if isinstance(b, dict)
-    ]
-
-    betfair = any(
-        "betfair exchange" in name.lower()
-        for name in names
-    )
-
-    return len(names), betfair
-
-
-if st.button(
-    "🔍 Run Complete Halftime Scan",
-    key="complete_halftime_scan"
-):
+def positive_odds(value):
     try:
-        payload = scan_get(
-            SCAN_BASE,
-            params={
-                "status": "live",
-                "per_page": 100
-            }
-        )
-
-        matches = payload.get("data") or []
-
-        if not isinstance(matches, list):
-            st.error("Unexpected match list format.")
-        else:
-            halftime = [
-                m for m in matches
-                if isinstance(m, dict)
-                and m.get("id")
-                and scan_is_halftime(m)
-            ]
-
-            st.write("Live matches returned:", len(matches))
-            st.write("Halftime matches detected:", len(halftime))
-
-            if not halftime:
-                st.info(
-                    "No halftime matches found in the "
-                    "returned live-match page. "
-                    "Try again when games reach halftime."
-                )
-
-            else:
-                results = []
-                progress = st.progress(0)
-
-                for index, match in enumerate(halftime):
-                    match_id = str(match["id"])
-
-                    home_name = (
-                        match.get("home_team") or {}
-                    ).get("name", "Home")
-
-                    away_name = (
-                        match.get("away_team") or {}
-                    ).get("name", "Away")
-
-                    score = match.get("score") or {}
-
-                    home_goals = score.get(
-                        "half_time_home"
-                    )
-                    away_goals = score.get(
-                        "half_time_away"
-                    )
-
-                    # Explicit halftime score preferred.
-                    # Never substitute a later live score.
-
-                    home_xg = None
-                    away_xg = None
-                    favourite = "Unknown"
-                    opening_odds = None
-                    opening_source = "Unavailable"
-                    opening_sources = 0
-                    live_books = 0
-                    betfair = False
-                    errors = []
-
-                    try:
-                        stats = scan_get(
-                            f"{SCAN_BASE}/{match_id}/live-stats"
-                        )
-                        home_xg, away_xg = scan_xg(stats)
-                    except (
-                        requests.RequestException,
-                        ValueError, TypeError
-                    ) as e:
-                        errors.append(f"xG: {e}")
-
-                    try:
-                        odds = scan_get(
-                            f"{SCAN_BASE}/{match_id}/odds"
-                        )
-
-                        (
-                            favourite,
-                            opening_odds,
-                            opening_source,
-                            opening_sources
-                        ) = scan_opening_favourite(odds)
-
-                    except (
-                        requests.RequestException,
-                        ValueError, TypeError
-                    ) as e:
-                        errors.append(f"Opening odds: {e}")
-
-                    try:
-                        live_odds = scan_get(
-                            f"{SCAN_BASE}/{match_id}/odds/live"
-                        )
-
-                        live_books, betfair = (
-                            scan_live_bookmakers(live_odds)
-                        )
-
-                    except (
-                        requests.RequestException,
-                        ValueError, TypeError
-                    ) as e:
-                        errors.append(f"Live odds: {e}")
-
-                    ready = (
-                        home_goals is not None
-                        and away_goals is not None
-                        and home_xg is not None
-                        and away_xg is not None
-                        and opening_odds is not None
-                        and favourite in ("Home", "Away")
-                        and live_books > 0
-                    )
-
-                    results.append({
-                        "Match": f"{home_name} v {away_name}",
-                        "HT score": (
-                            f"{home_goals}-{away_goals}"
-                            if home_goals is not None
-                            and away_goals is not None
-                            else "Unavailable"
-                        ),
-                        "Home HT xG": home_xg,
-                        "Away HT xG": away_xg,
-                        "Opening favourite": favourite,
-                        "Opening odds": opening_odds,
-                        "Opening bookmaker": opening_source,
-                        "Opening sources": opening_sources,
-                        "Live bookmakers": live_books,
-                        "Betfair Exchange": betfair,
-                        "Data status": (
-                            "Inputs found — verify freshness"
-                            if ready else "Incomplete"
-                        ),
-                        "Request errors": "; ".join(errors)
-                    })
-
-                    progress.progress(
-                        (index + 1) / len(halftime)
-                    )
-
-                report = pd.DataFrame(results)
-
-                st.subheader("Combined Halftime Results")
-
-                st.dataframe(
-                    report,
-                    hide_index=True,
-                    use_container_width=True
-                )
-
-                st.download_button(
-                    "Download Halftime Results",
-                    report.to_csv(index=False).encode("utf-8"),
-                    file_name="halftime_combined.csv",
-                    mime="text/csv"
-                )
-
-                st.warning(
-                    "Inputs found does not mean a value bet "
-                    "has been identified. Opening prices may "
-                    "differ from pre-kickoff closing prices. "
-                    "Live odds may be delayed or suspended."
-                )
-
-    except (
-        requests.RequestException,
-        ValueError, KeyError, TypeError
-    ) as e:
-        st.error(f"Halftime scan failed: {e}")
-
-st.header("🔬 Live xG Diagnostic")
-
-st.caption(
-    "Inspect actual live-statistics responses to determine "
-    "whether xG is missing or stored in a different format."
-)
-
-XG_BASE = "https://api.thestatsapi.com/api/football/matches"
-
-if "xg_diag_matches" not in st.session_state:
-    st.session_state.xg_diag_matches = []
-
-if st.button("Find Matches for xG Test", key="xg_diag_find"):
-    try:
-        response = requests.get(
-            XG_BASE,
-            headers={
-                "Authorization": (
-                    f"Bearer {st.secrets['STATS_API_KEY']}"
-                )
-            },
-            params={
-                "status": "live",
-                "per_page": 100
-            },
-            timeout=20
-        )
-
-        response.raise_for_status()
-
-        matches = response.json().get("data", [])
-
-        if isinstance(matches, list):
-            st.session_state.xg_diag_matches = [
-                m for m in matches
-                if isinstance(m, dict) and m.get("id")
-            ]
-
-            st.success(
-                f"Found {len(st.session_state.xg_diag_matches)} "
-                "live matches"
-            )
-        else:
-            st.error("Unexpected match response.")
-
-    except (requests.RequestException, ValueError) as e:
-        st.error(f"Match search failed: {e}")
-
-
-diag_matches = st.session_state.xg_diag_matches
-
-if diag_matches:
-    options = {}
-
-    for match in diag_matches:
-        home = (
-            match.get("home_team") or {}
-        ).get("name", "Home")
-
-        away = (
-            match.get("away_team") or {}
-        ).get("name", "Away")
-
-        match_id = str(match["id"])
-
-        label = f"{home} v {away} [{match_id}]"
-        options[label] = match
-
-    selected_label = st.selectbox(
-        "Choose match to inspect",
-        list(options.keys()),
-        key="xg_diag_selection"
-    )
-
-    selected_match = options[selected_label]
-    selected_id = str(selected_match["id"])
-
-    st.write(
-        "xG available flag:",
-        selected_match.get("xg_available")
-    )
-
-    st.write(
-        "Live match status:",
-        selected_match.get("live")
-    )
-
-    if st.button(
-        "Inspect Live Statistics",
-        key="xg_diag_inspect"
-    ):
-        headers = {
-            "Authorization": (
-                f"Bearer {st.secrets['STATS_API_KEY']}"
-            )
-        }
-
-        for endpoint in ("live-stats", "stats"):
-            st.subheader(f"Endpoint: {endpoint}")
-
-            try:
-                response = requests.get(
-                    f"{XG_BASE}/{selected_id}/{endpoint}",
-                    headers=headers,
-                    timeout=20
-                )
-
-                st.write(
-                    "HTTP status:",
-                    response.status_code
-                )
-
-                if response.ok:
-                    payload = response.json()
-
-                    home_xg, away_xg = auto_first_half_xg(
-                        payload
-                    )
-
-                    if home_xg is not None:
-                        st.success(
-                            f"First-half xG found: "
-                            f"Home {home_xg:.2f} | "
-                            f"Away {away_xg:.2f}"
-                        )
-                    else:
-                        st.warning(
-                            "Our current extractor did not "
-                            "find first-half xG."
-                        )
-
-                    st.json(payload)
-
-                else:
-                    st.code(response.text[:1000])
-
-            except (
-                requests.RequestException,
-                ValueError,
-                TypeError
-            ) as e:
-                st.error(f"{endpoint} failed: {e}")
-
-# 18-MARKET LIVE ODDS MAPPING TEST
-
-st.divider()
-st.header("🎯 18-Market Odds Mapping Test")
-
-st.caption(
-    "Checks which historical betting markets can be matched "
-    "to actual live bookmaker market definitions. "
-    "No value signals are generated here."
-)
-
-MAP_BASE = "https://api.thestatsapi.com/api/football/matches"
-
-HISTORICAL_MARKETS_18 = {
-    "Home full-time win": ("match_odds", "home"),
-    "Draw full-time": ("match_odds", "draw"),
-    "Away full-time win": ("match_odds", "away"),
-    "Home scores in 2H": (None, None),
-    "Away scores in 2H": (None, None),
-    "Over 0.5 goals 2H": (None, None),
-    "Over 1.5 goals 2H": (None, None),
-    "Over 2.5 goals 2H": (None, None),
-    "Home wins 2H": ("second_half_result", "home"),
-    "Draw 2H": ("second_half_result", "draw"),
-    "Away wins 2H": ("second_half_result", "away"),
-    "BTTS Yes FT": ("btts", "yes"),
-    "Over 1.5 goals FT": ("total_goals", "over_1.5"),
-    "Under 1.5 goals FT": ("total_goals", "under_1.5"),
-    "Over 2.5 goals FT": ("total_goals", "over_2.5"),
-    "Under 2.5 goals FT": ("total_goals", "under_2.5"),
-    "Over 3.5 goals FT": ("total_goals", "over_3.5"),
-    "Under 3.5 goals FT": ("total_goals", "under_3.5"),
-}
-
-def map_request(url, params=None):
-    response = requests.get(
-        url,
-        headers={
-            "Authorization": (
-                f"Bearer {st.secrets['STATS_API_KEY']}"
-            )
-        },
-        params=params,
-        timeout=25
-    )
-    response.raise_for_status()
-    return response.json()
-
-
-def map_normalize(value):
-    return (
-        str(value)
-        .lower()
-        .replace(" ", "_")
-        .replace("-", "_")
-        .replace(".", "_")
-        .strip("_")
-    )
-
-
-def map_find_nodes(obj, path=()):
-    """
-    Walk through the actual odds response without
-    assuming every bookmaker uses the same nesting.
-    """
-    if isinstance(obj, dict):
-        if (
-            "available_to_back" in obj
-            or "available_to_lay" in obj
-            or "live" in obj
-        ):
-            yield path, obj
-
-        for key, value in obj.items():
-            if isinstance(value, (dict, list)):
-                yield from map_find_nodes(
-                    value, path + (str(key),)
-                )
-
-    elif isinstance(obj, list):
-        for index, value in enumerate(obj):
-            yield from map_find_nodes(
-                value, path + (str(index),)
-            )
-
-
-def map_best_back(node):
-    offers = node.get("available_to_back") or []
-
-    valid = []
-
-    if isinstance(offers, list):
-        for offer in offers:
-            if not isinstance(offer, dict):
-                continue
-
-            try:
-                price = float(offer["price"])
-                size = float(offer.get("size", 0))
-
-                if (
-                    math.isfinite(price)
-                    and math.isfinite(size)
-                    and price > 1
-                    and size > 0
-                ):
-                    valid.append((price, size))
-
-            except (TypeError, ValueError, KeyError):
-                pass
-
-    if valid:
-        return max(valid, key=lambda item: item[0])
-
-    return None, None
-
-
-if "market_map_matches" not in st.session_state:
-    st.session_state.market_map_matches = []
-
-
-if st.button(
-    "Find Live Matches for Market Test",
-    key="market_map_find"
-):
-    try:
-        payload = map_request(
-            MAP_BASE,
-            params={"status": "live", "per_page": 100}
-        )
-
-        matches = payload.get("data") or []
-
-        if not isinstance(matches, list):
-            st.error("Unexpected match list.")
-        else:
-            st.session_state.market_map_matches = [
-                m for m in matches
-                if isinstance(m, dict) and m.get("id")
-            ]
-
-            st.success(
-                f"Found {len(st.session_state.market_map_matches)} "
-                "live matches."
-            )
-
-    except (
-        requests.RequestException,
-        ValueError,
-        TypeError
-    ) as error:
-        st.error(f"Could not find matches: {error}")
-
-
-map_matches = st.session_state.market_map_matches
-
-if map_matches:
-    choices = {}
-
-    for match in map_matches:
-        home = (
-            match.get("home_team") or {}
-        ).get("name", "Home")
-
-        away = (
-            match.get("away_team") or {}
-        ).get("name", "Away")
-
-        match_id = str(match["id"])
-
-        choices[f"{home} v {away} [{match_id}]"] = match
-
-    chosen = st.selectbox(
-        "Select a live match",
-        list(choices),
-        key="market_map_match"
-    )
-
-    selected_match = choices[chosen]
-    selected_id = str(selected_match["id"])
-
-    if st.button(
-        "Check All 18 Markets",
-        key="market_map_check"
-    ):
-        try:
-            payload = map_request(
-                f"{MAP_BASE}/{selected_id}/odds/live"
-            )
-
-            data = payload.get("data") or {}
-            bookmakers = data.get("bookmakers") or []
-
-            if not isinstance(bookmakers, list):
-                bookmakers = []
-
-            st.write(
-                f"Bookmakers returned: {len(bookmakers)}"
-            )
-
-            all_rows = []
-
-            for bookmaker in bookmakers:
-                if not isinstance(bookmaker, dict):
-                    continue
-
-                bookmaker_name = str(
-                    bookmaker.get("bookmaker", "Unknown")
-                )
-
-                markets = bookmaker.get("markets") or {}
-
-                for path, node in map_find_nodes(markets):
-                    if not path:
-                        continue
-
-                    market_key = map_normalize(path[0])
-                    selection_path = tuple(
-                        map_normalize(part)
-                        for part in path[1:]
-                    )
-
-                    back_price, back_size = map_best_back(node)
-
-                    all_rows.append({
-                        "Bookmaker": bookmaker_name,
-                        "Market key": market_key,
-                        "Selection path": "/".join(
-                            selection_path
-                        ),
-                        "Back price": back_price,
-                        "Back size": back_size,
-                        "Raw node": node
-                    })
-
-            odds_df = pd.DataFrame(all_rows)
-
-            if odds_df.empty:
-                st.warning(
-                    "No recognisable odds nodes were found. "
-                    "Inspect the raw response below."
-                )
-            else:
-                st.subheader("Market Mapping Results")
-
-                results = []
-
-                for historical_name, mapping in (
-                    HISTORICAL_MARKETS_18.items()
-                ):
-                    target_market, target_selection = mapping
-
-                    if target_market is None:
-                        results.append({
-                            "Historical market": historical_name,
-                            "Status": "Needs mapping",
-                            "Matching nodes": 0,
-                            "Betfair back": None,
-                            "Back size": None
-                        })
-                        continue
-
-                    candidates = odds_df[
-                        odds_df["Market key"].eq(
-                            target_market
-                        )
-                    ].copy()
-
-                    candidates = candidates[
-                        candidates["Selection path"].eq(
-                            target_selection
-                        )
-                    ]
-
-                    betfair = candidates[
-                        candidates["Bookmaker"]
-                        .str.lower()
-                        .str.contains(
-                            "betfair exchange",
-                            regex=False,
-                            na=False
-                        )
-                    ]
-
-                    betfair = betfair.dropna(
-                        subset=["Back price"]
-                    )
-
-                    if not betfair.empty:
-                        best = betfair.sort_values(
-                            "Back price",
-                            ascending=False
-                        ).iloc[0]
-
-                        price = best["Back price"]
-                        size = best["Back size"]
-
-                    else:
-                        price = None
-                        size = None
-
-                    results.append({
-                        "Historical market": historical_name,
-                        "Status": (
-                            "Candidate found - verify"
-                            if not candidates.empty
-                            else "Not found"
-                        ),
-                        "Matching nodes": len(candidates),
-                        "Betfair back": price,
-                        "Back size": size
-                    })
-
-                result_df = pd.DataFrame(results)
-
-                st.dataframe(
-                    result_df,
-                    hide_index=True,
-                    use_container_width=True
-                )
-
-                st.download_button(
-                    "Download 18-Market Mapping",
-                    result_df.to_csv(
-                        index=False
-                    ).encode("utf-8"),
-                    file_name="18_market_mapping.csv",
-                    mime="text/csv",
-                    key="market_map_download"
-                )
-
-                st.subheader("Available Market Names")
-
-                market_summary = (
-                    odds_df.groupby(
-                        "Market key",
-                        as_index=False
-                    )
-                    .agg(
-                        Selections=("Selection path", "nunique"),
-                        Bookmakers=("Bookmaker", "nunique")
-                    )
-                    .sort_values("Market key")
-                )
-
-                st.dataframe(
-                    market_summary,
-                    hide_index=True,
-                    use_container_width=True
-                )
-
-                with st.expander(
-                    "Inspect all selection paths"
-                ):
-                    st.dataframe(
-                        odds_df[
-                            [
-                                "Bookmaker",
-                                "Market key",
-                                "Selection path",
-                                "Back price",
-                                "Back size"
-                            ]
-                        ],
-                        hide_index=True,
-                        use_container_width=True
-                    )
-
-                st.download_button(
-                    "Download All Odds Paths",
-                    odds_df.drop(
-                        columns=["Raw node"]
-                    ).to_csv(
-                        index=False
-                    ).encode("utf-8"),
-                    file_name="live_market_paths.csv",
-                    mime="text/csv",
-                    key="market_paths_download"
-                )
-
-            with st.expander(
-                "Inspect original API odds response"
-            ):
-                st.json(payload)
-
-            st.info(
-                "These are candidate mappings, not "
-                "verified market definitions. "
-                "No betting value has been calculated."
-            )
-
-        except (
-            requests.RequestException,
-            ValueError,
-            TypeError,
-            KeyError
-        ) as error:
-            st.error(f"Market mapping failed: {error}")
-
-# ALL-BOOKMAKER PRICE COMPARISON - STAGE 1
-
-st.divider()
-st.header("🏆 All-Bookmaker Price Comparison")
-st.caption(
-    "Compares available back prices across bookmakers. "
-    "Market mappings are provisional, not betting signals."
-)
-
-COMPARE_BASE = "https://api.thestatsapi.com/api/football/matches"
-
-COMPARE_MARKETS = {
-    "Home full-time win": ("match_odds", "home"),
-    "Draw full-time": ("match_odds", "draw"),
-    "Away full-time win": ("match_odds", "away"),
-    "Home scores in 2H": (None, None),
-    "Away scores in 2H": (None, None),
-    "Over 0.5 goals 2H": (None, None),
-    "Over 1.5 goals 2H": (None, None),
-    "Over 2.5 goals 2H": (None, None),
-    "Home wins 2H": ("second_half_result", "home"),
-    "Draw 2H": ("second_half_result", "draw"),
-    "Away wins 2H": ("second_half_result", "away"),
-    "BTTS Yes FT": ("btts", "yes"),
-    "Over 1.5 goals FT": ("total_goals", "over_1_5"),
-    "Under 1.5 goals FT": ("total_goals", "under_1_5"),
-    "Over 2.5 goals FT": ("total_goals", "over_2_5"),
-    "Under 2.5 goals FT": ("total_goals", "under_2_5"),
-    "Over 3.5 goals FT": ("total_goals", "over_3_5"),
-    "Under 3.5 goals FT": ("total_goals", "under_3_5"),
-}
-
-def compare_api(url, params=None):
-    response = requests.get(
-        url,
-        headers={
-            "Authorization": (
-                f"Bearer {st.secrets['STATS_API_KEY']}"
-            )
-        },
-        params=params,
-        timeout=25
-    )
-    response.raise_for_status()
-    return response.json()
-
-
-def compare_normalize(value):
-    import re
-    return re.sub(
-        r"[^a-z0-9]+", "_", str(value).lower()
-    ).strip("_")
-
-
-def compare_number(value):
-    try:
-        number = float(value)
-        if math.isfinite(number) and number > 1:
-            return number
+        value = float(value)
+        return value if math.isfinite(value) and value > 1 else None
     except (ValueError, TypeError):
-        pass
-    return None
+        return None
 
 
-def compare_walk(obj, path=()):
+def opening_favourite(payload):
+    books = (payload.get("data") or {}).get("bookmakers") or []
+    candidates = []
+    for book in books:
+        if not isinstance(book, dict):
+            continue
+        match_odds = (book.get("markets") or {}).get("match_odds") or {}
+        h = positive_odds((match_odds.get("home") or {}).get("opening"))
+        a = positive_odds((match_odds.get("away") or {}).get("opening"))
+        if h is None or a is None:
+            continue
+        side = "Home" if h < a else "Away" if a < h else "Level"
+        candidates.append((str(book.get("bookmaker", "Unknown")), side, min(h, a)))
+    if not candidates:
+        return "Unknown", None, "Unavailable", 0
+    preferred = next((c for c in candidates if c[0].lower() == "pinnacle"), candidates[0])
+    return preferred[1], preferred[2], preferred[0], len(candidates)
+
+
+def bookmaker_names(payload):
+    books = (payload.get("data") or {}).get("bookmakers") or []
+    return [str(b.get("bookmaker", "Unknown")) for b in books if isinstance(b, dict)]
+
+
+def match_name(match):
+    home = (match.get("home_team") or {}).get("name", "Home")
+    away = (match.get("away_team") or {}).get("name", "Away")
+    return f"{home} v {away}"
+
+
+if st.button("🔍 Run Complete Halftime Scan", key="clean_ht_scan"):
+    try:
+        matches = live_matches()
+        halftime = [m for m in matches if is_halftime(m)]
+        st.write(f"Live matches returned: {len(matches)}")
+        st.write(f"Halftime matches detected: {len(halftime)}")
+        if len(matches) == 100:
+            st.warning("Only the first 100 live matches were checked; additional pages may exist.")
+        if not halftime:
+            st.info("No halftime matches detected in the returned page. Try again during live fixtures.")
+            with st.expander("Inspect status labels"):
+                for m in matches[:15]:
+                    st.write({"Match": match_name(m), "live": m.get("live")})
+        else:
+            rows = []
+            for m in halftime:
+                match_id = str(m["id"])
+                score = m.get("score") or {}
+                ht_h, ht_a = score.get("half_time_home"), score.get("half_time_away")
+                # When explicitly at HT, current score is a fallback if HT-specific keys are missing.
+                if ht_h is None and ht_a is None and is_halftime(m):
+                    ht_h, ht_a = score.get("home"), score.get("away")
+                xgh = xga = opening = None
+                favourite, source, source_count = "Unknown", "Unavailable", 0
+                books = []
+                issues = []
+                try:
+                    xgh, xga = first_half_xg(api_get(f"/{match_id}/live-stats"))
+                except (requests.RequestException, ValueError, TypeError) as e:
+                    issues.append(f"xG: {e}")
+                try:
+                    favourite, opening, source, source_count = opening_favourite(
+                        api_get(f"/{match_id}/odds"))
+                except (requests.RequestException, ValueError, TypeError) as e:
+                    issues.append(f"Opening odds: {e}")
+                try:
+                    books = bookmaker_names(api_get(f"/{match_id}/odds/live"))
+                except (requests.RequestException, ValueError, TypeError) as e:
+                    issues.append(f"Live odds: {e}")
+                complete = (ht_h is not None and ht_a is not None and xgh is not None
+                            and xga is not None and opening is not None
+                            and favourite in ("Home", "Away") and bool(books))
+                rows.append({
+                    "Match": match_name(m), "Match ID": match_id,
+                    "HT score": f"{ht_h}-{ht_a}" if ht_h is not None and ht_a is not None else "Unavailable",
+                    "Home HT xG": xgh, "Away HT xG": xga,
+                    "Opening favourite": favourite, "Opening odds": opening,
+                    "Opening bookmaker": source, "Opening sources": source_count,
+                    "Live bookmakers": len(books),
+                    "Betfair Exchange": any("betfair exchange" in b.lower() for b in books),
+                    "Data status": "Inputs found — verify" if complete else "Incomplete",
+                    "Request errors": "; ".join(issues),
+                })
+            report = pd.DataFrame(rows)
+            st.dataframe(report, hide_index=True, use_container_width=True)
+            st.download_button("Download halftime results", report.to_csv(index=False).encode(),
+                               "halftime_combined.csv", "text/csv")
+    except (requests.RequestException, ValueError, KeyError, TypeError) as e:
+        st.error(f"Scan failed: {e}")
+
+st.caption("Opening prices are not verified closing prices. HT xG is accepted only when the live-stats endpoint confirms halftime.")
+
+# One consolidated odds explorer replaces multiple experimental monitors.
+st.divider()
+st.header("💷 Live Odds Explorer")
+st.caption("Inspect bookmaker quotes and candidate market paths for one live match. Quotes may be delayed or suspended.")
+
+# These are tentative mappings. Five markets still have no validated API equivalent.
+MARKET_PATHS = {
+    "Home full-time win": ("match_odds", "home"),
+    "Draw full-time": ("match_odds", "draw"),
+    "Away full-time win": ("match_odds", "away"),
+    "Home scores in 2H": None,
+    "Away scores in 2H": None,
+    "Over 0.5 goals 2H": None,
+    "Over 1.5 goals 2H": None,
+    "Over 2.5 goals 2H": None,
+    "Home wins 2H": ("second_half_result", "home"),
+    "Draw 2H": ("second_half_result", "draw"),
+    "Away wins 2H": ("second_half_result", "away"),
+    "BTTS Yes FT": ("btts", "yes"),
+    "Over 1.5 goals FT": ("total_goals", "1.5", "over"),
+    "Under 1.5 goals FT": ("total_goals", "1.5", "under"),
+    "Over 2.5 goals FT": ("total_goals", "2.5", "over"),
+    "Under 2.5 goals FT": ("total_goals", "2.5", "under"),
+    "Over 3.5 goals FT": ("total_goals", "3.5", "over"),
+    "Under 3.5 goals FT": ("total_goals", "3.5", "under"),
+}
+
+
+def walk_quotes(obj, path=()):
     if isinstance(obj, dict):
-        # A selection node may contain live prices
-        # and/or Exchange order-book offers.
-        if any(
-            key in obj
-            for key in (
-                "live",
-                "available_to_back",
-                "available_to_lay"
-            )
-        ):
+        if "live" in obj or "available_to_back" in obj:
             yield path, obj
-
+            return
         for key, value in obj.items():
             if isinstance(value, (dict, list)):
-                yield from compare_walk(
-                    value, path + (str(key),)
-                )
-
+                yield from walk_quotes(value, path + (str(key),))
     elif isinstance(obj, list):
-        for index, value in enumerate(obj):
-            yield from compare_walk(
-                value, path + (str(index),)
-            )
+        for i, value in enumerate(obj):
+            yield from walk_quotes(value, path + (str(i),))
 
 
-def compare_prices(node, exchange):
-    if exchange:
-        offers = node.get("available_to_back") or []
-        valid = []
-
-        if isinstance(offers, list):
-            for offer in offers:
-                if not isinstance(offer, dict):
-                    continue
-
-                price = compare_number(
-                    offer.get("price")
-                )
-
-                try:
-                    size = float(offer.get("size", 0))
-                except (ValueError, TypeError):
-                    size = 0
-
-                if (
-                    price is not None
-                    and math.isfinite(size)
-                    and size > 0
-                ):
-                    valid.append((price, size))
-
-        if valid:
-            return max(valid, key=lambda x: x[0])
-
-        # Never substitute a generic live quote
-        # for a verified Exchange back offer.
-        return None, None
-
-    return compare_number(node.get("live")), None
-
-
-def compare_collect(payload, commission):
-    data = payload.get("data") or {}
-    bookmakers = data.get("bookmakers") or []
+def quote_rows(payload, commission):
     rows = []
-
-    for bookmaker in bookmakers:
-        if not isinstance(bookmaker, dict):
+    books = (payload.get("data") or {}).get("bookmakers") or []
+    for book in books:
+        if not isinstance(book, dict):
             continue
-
-        name = str(
-            bookmaker.get("bookmaker", "Unknown")
-        )
+        name = str(book.get("bookmaker", "Unknown"))
         exchange = "betfair exchange" in name.lower()
-        markets = bookmaker.get("markets") or {}
-
-        if not isinstance(markets, dict):
-            continue
-
-        for path, node in compare_walk(markets):
+        for path, node in walk_quotes(book.get("markets") or {}):
             if len(path) < 2:
                 continue
-
-            market = compare_normalize(path[0])
-            selection = "/".join(
-                compare_normalize(p) for p in path[1:]
-            )
-
-            price, size = compare_prices(
-                node, exchange
-            )
-
-            effective = None
-            if price is not None:
-                effective = (
-                    1 + (price - 1) * (1 - commission)
-                    if exchange else price
-                )
-
-            rows.append({
-                "Bookmaker": name,
-                "Market": market,
-                "Selection": selection,
-                "Odds": price,
-                "Effective odds": effective,
-                "Back size": size,
-                "Exchange": exchange
-            })
-
+            price = None
+            size = None
+            if exchange:
+                offers = []
+                for offer in node.get("available_to_back") or []:
+                    if not isinstance(offer, dict):
+                        continue
+                    p = positive_odds(offer.get("price"))
+                    try:
+                        s = float(offer.get("size", 0))
+                    except (ValueError, TypeError):
+                        s = 0
+                    if p is not None and math.isfinite(s) and s > 0:
+                        offers.append((p, s))
+                if offers:
+                    price, size = max(offers)
+            else:
+                price = positive_odds(node.get("live"))
+            effective = (1 + (price - 1) * (1 - commission)) if exchange and price else price
+            rows.append({"Bookmaker": name, "Market": path[0],
+                         "Selection": "/".join(path[1:]).replace("_", "."), "Odds": price,
+                         "Effective odds": effective, "Back size": size,
+                         "Exchange": exchange})
     return pd.DataFrame(rows)
 
 
-if "compare_matches" not in st.session_state:
-    st.session_state.compare_matches = []
-
-if st.button(
-    "Find Live Matches",
-    key="compare_find_matches"
-):
+if st.button("Find live matches for odds", key="clean_find_odds"):
     try:
-        payload = compare_api(
-            COMPARE_BASE,
-            {"status": "live", "per_page": 100}
-        )
+        st.session_state["clean_live_matches"] = live_matches()
+    except (requests.RequestException, ValueError, KeyError, TypeError) as e:
+        st.error(f"Live match search failed: {e}")
 
-        matches = payload.get("data") or []
-
-        if isinstance(matches, list):
-            st.session_state.compare_matches = [
-                m for m in matches
-                if isinstance(m, dict) and m.get("id")
-            ]
-            st.success(
-                f"Found {len(st.session_state.compare_matches)} "
-                "live matches"
-            )
-        else:
-            st.error("Unexpected match response.")
-
-    except (requests.RequestException, ValueError) as e:
-        st.error(f"Match search failed: {e}")
-
-
-compare_matches = st.session_state.compare_matches
-
-if compare_matches:
-    options = {}
-
-    for match in compare_matches:
-        home = (
-            match.get("home_team") or {}
-        ).get("name", "Home")
-        away = (
-            match.get("away_team") or {}
-        ).get("name", "Away")
-        match_id = str(match["id"])
-
-        options[f"{home} v {away} [{match_id}]"] = match
-
-    selected_label = st.selectbox(
-        "Choose match",
-        list(options),
-        key="compare_match_select"
-    )
-
-    selected_id = str(
-        options[selected_label]["id"]
-    )
-
-    commission_pct = st.number_input(
-        "Betfair Exchange commission (%)",
-        min_value=0.0,
-        max_value=20.0,
-        value=2.0,
-        step=0.5,
-        key="compare_commission"
-    )
-
-    betfair_only = st.checkbox(
-        "Show Betfair Exchange only",
-        value=False,
-        key="compare_betfair_only"
-    )
-
-    if st.button(
-        "Compare All 18 Markets",
-        key="compare_run"
-    ):
+odds_matches = st.session_state.get("clean_live_matches", [])
+if odds_matches:
+    choices = {f"{match_name(m)} [{m['id']}]": m for m in odds_matches}
+    label = st.selectbox("Choose match", list(choices), key="clean_match_select")
+    match = choices[label]
+    if st.button("Load live bookmaker prices", key="clean_load_odds"):
         try:
-            payload = compare_api(
-                f"{COMPARE_BASE}/{selected_id}/odds/live"
-            )
-
-            odds = compare_collect(
-                payload,
-                commission_pct / 100
-            )
-
-            if odds.empty:
-                st.warning(
-                    "No price selections were found."
-                )
-
-            else:
-                st.write(
-                    "Bookmakers:",
-                    ", ".join(
-                        sorted(
-                            odds["Bookmaker"].unique()
-                        )
-                    )
-                )
-
-                if betfair_only:
-                    odds = odds[
-                        odds["Exchange"]
-                    ].copy()
-
-                results = []
-
-                for name, mapping in (
-                    COMPARE_MARKETS.items()
-                ):
-                    market, selection = mapping
-
-                    if market is None:
-                        results.append({
-                            "Historical market": name,
-                            "Status": "Needs mapping",
-                            "Best bookmaker": None,
-                            "Odds": None,
-                            "Effective odds": None,
-                            "Betfair odds": None,
-                            "Back size": None
-                        })
-                        continue
-
-                    matches = odds[
-                        (odds["Market"] == market)
-                        & (
-                            odds["Selection"]
-                            == selection
-                        )
-                    ].copy()
-
-                    priced = matches.dropna(
-                        subset=["Effective odds"]
-                    )
-
-                    if priced.empty:
-                        results.append({
-                            "Historical market": name,
-                            "Status": (
-                                "Selection found, no back price"
-                                if not matches.empty
-                                else "No exact match"
-                            ),
-                            "Best bookmaker": None,
-                            "Odds": None,
-                            "Effective odds": None,
-                            "Betfair odds": None,
-                            "Back size": None
-                        })
-                        continue
-
-                    best = priced.sort_values(
-                        "Effective odds",
-                        ascending=False
-                    ).iloc[0]
-
-                    bf = priced[
-                        priced["Exchange"]
-                    ]
-
-                    if not bf.empty:
-                        bf_best = bf.sort_values(
-                            "Effective odds",
-                            ascending=False
-                        ).iloc[0]
-                        bf_odds = bf_best["Odds"]
-                        bf_size = bf_best["Back size"]
-                    else:
-                        bf_odds = None
-                        bf_size = None
-
-                    results.append({
-                        "Historical market": name,
-                        "Status": "Candidate - verify",
-                        "Best bookmaker": best["Bookmaker"],
-                        "Odds": best["Odds"],
-                        "Effective odds": best["Effective odds"],
-                        "Betfair odds": bf_odds,
-                        "Back size": bf_size
-                    })
-
-                result_df = pd.DataFrame(results)
-
-                st.subheader(
-                    "18-Market Price Comparison"
-                )
-
-                st.dataframe(
-                    result_df,
-                    hide_index=True,
-                    use_container_width=True
-                )
-
-                st.download_button(
-                    "Download Comparison",
-                    result_df.to_csv(
-                        index=False
-                    ).encode("utf-8"),
-                    file_name="bookmaker_comparison.csv",
-                    mime="text/csv",
-                    key="compare_download"
-                )
-
-                st.subheader(
-                    "All Available Selection Paths"
-                )
-
-                st.dataframe(
-                    odds.drop(
-                        columns=["Exchange"]
-                    ),
-                    hide_index=True,
-                    use_container_width=True
-                )
-
-                st.download_button(
-                    "Download Selection Paths",
-                    odds.to_csv(
-                        index=False
-                    ).encode("utf-8"),
-                    file_name="bookmaker_paths.csv",
-                    mime="text/csv",
-                    key="compare_paths_download"
-                )
-
-                with st.expander(
-                    "Inspect raw bookmaker response"
-                ):
-                    st.json(payload)
-
-                st.warning(
-                    "Candidate mappings are unverified. "
-                    "Effective odds assume commission "
-                    "only on Exchange winnings. "
-                    "Prices may be stale or unavailable "
-                    "when placing a bet. No value "
-                    "signals are generated."
-                )
-
-        except (
-            requests.RequestException,
-            ValueError,
-            TypeError,
-            KeyError
-        ) as e:
-            st.error(
-                f"Comparison failed: {e}"
-            )
-
-# PRE-MATCH ODDS AVAILABILITY DIAGNOSTIC
-
-st.divider()
-st.header("🕒 Pre-Match Odds Diagnostic")
-
-st.caption(
-    "Tests whether original pre-kickoff odds can "
-    "be retrieved for matches already underway. "
-    "Does not treat live odds as pre-match odds."
-)
-
-PRE_BASE = "https://api.thestatsapi.com/api/football/matches"
-
-if "prematch_test_matches" not in st.session_state:
-    st.session_state.prematch_test_matches = []
-
-if st.button(
-    "Find Matches for Pre-Match Test",
-    key="prematch_find"
-):
-    try:
-        response = requests.get(
-            PRE_BASE,
-            headers={
-                "Authorization":
-                f"Bearer {st.secrets['STATS_API_KEY']}"
-            },
-            params={
-                "status": "live",
-                "per_page": 100
-            },
-            timeout=20
-        )
-
-        response.raise_for_status()
-        payload = response.json()
-        matches = payload.get("data") or []
-
-        if not isinstance(matches, list):
-            st.error("Unexpected match response.")
+            payload = api_get(f"/{match['id']}/odds/live")
+            st.session_state["clean_odds_result"] = (str(match['id']), payload)
+        except (requests.RequestException, ValueError, KeyError, TypeError) as e:
+            st.error(f"Live odds request failed: {e}")
+    saved = st.session_state.get("clean_odds_result")
+    if saved and saved[0] == str(match["id"]):
+        raw = saved[1]
+        st.write("Bookmakers:", ", ".join(bookmaker_names(raw)) or "None")
+        all_prices = quote_rows(raw, commission)
+        if all_prices.empty:
+            st.info("No quote nodes found.")
         else:
-            st.session_state.prematch_test_matches = [
-                m for m in matches
-                if isinstance(m, dict) and m.get("id")
-            ]
-
-            st.success(
-                f"Found {len(st.session_state.prematch_test_matches)} "
-                "live matches."
-            )
-
-    except (requests.RequestException, ValueError) as e:
-        st.error(f"Match search failed: {e}")
-
-
-pre_matches = st.session_state.prematch_test_matches
-
-if pre_matches:
-    pre_options = {}
-
-    for match in pre_matches:
-        home = (
-            match.get("home_team") or {}
-        ).get("name", "Home")
-
-        away = (
-            match.get("away_team") or {}
-        ).get("name", "Away")
-
-        match_id = str(match["id"])
-
-        label = f"{home} v {away} [{match_id}]"
-        pre_options[label] = match
-
-    chosen = st.selectbox(
-        "Choose live match",
-        list(pre_options),
-        key="prematch_choose"
-    )
-
-    selected = pre_options[chosen]
-    selected_id = str(selected["id"])
-
-    st.write(
-        "Current match status:",
-        selected.get("live")
-    )
-
-    if st.button(
-        "Investigate Original Odds",
-        key="prematch_investigate"
-    ):
-        headers = {
-            "Authorization":
-            f"Bearer {st.secrets['STATS_API_KEY']}"
-        }
-
-        # The following endpoints are exploratory.
-        # Their availability is not yet confirmed.
-        endpoints = [
-            ("Match details", f"{PRE_BASE}/{selected_id}"),
-            (
-                "Possible pre-match odds endpoint",
-                f"{PRE_BASE}/{selected_id}/odds/prematch"
-            ),
-            (
-                "Possible general odds endpoint",
-                f"{PRE_BASE}/{selected_id}/odds"
-            )
-        ]
-
-        for label, url in endpoints:
-            st.subheader(label)
-
-            try:
-                response = requests.get(
-                    url,
-                    headers=headers,
-                    timeout=20
-                )
-
-                st.write(
-                    "HTTP status:",
-                    response.status_code
-                )
-
-                if response.ok:
-                    try:
-                        payload = response.json()
-                        st.json(payload)
-                    except ValueError:
-                        st.code(response.text[:2000])
+            comparison = []
+            for market, path in MARKET_PATHS.items():
+                if path is None:
+                    comparison.append({"Historical market": market, "Status": "Not mapped"})
+                    continue
+                candidates = all_prices[
+                    (all_prices["Market"] == path[0]) &
+                    (all_prices["Selection"] == "/".join(path[1:]))
+                ].dropna(subset=["Effective odds"])
+                if candidates.empty:
+                    comparison.append({"Historical market": market, "Status": "No matching quote"})
                 else:
-                    st.code(response.text[:1000])
-
-            except requests.RequestException as e:
-                st.error(f"Request failed: {e}")
-
-        st.warning(
-            "These tests do not establish whether "
-            "an odds quote is pre-match or in-play. "
-            "We must confirm the endpoint definition, "
-            "timestamp and market before using it."
-        )
-
-# AUTOMATIC PRE-MATCH FAVOURITE ODDS TEST
-
-st.divider()
-st.header("🏁 Automatic Favourite Odds Test")
-
-st.caption(
-    "Reads opening match odds from TheStatsAPI. "
-    "Opening odds are not necessarily closing odds."
-)
-
-if st.button(
-    "Find Favourite Odds for Live Matches",
-    key="auto_favourite_test"
-):
-    try:
-        matches_payload = auto_get(
-            AUTO_BASE,
-            params={"status": "live", "per_page": 100}
-        )
-
-        matches = matches_payload.get("data") or []
-        results = []
-
-        for match in matches:
-            if not isinstance(match, dict):
-                continue
-
-            match_id = match.get("id")
-            if not match_id:
-                continue
-
-            home = (
-                match.get("home_team") or {}
-            ).get("name", "Home")
-
-            away = (
-                match.get("away_team") or {}
-            ).get("name", "Away")
-
-            try:
-                odds_payload = auto_get(
-                    f"{AUTO_BASE}/{match_id}/odds"
-                )
-
-                bookmakers = (
-                    odds_payload.get("data") or {}
-                ).get("bookmakers") or []
-
-                prices = []
-
-                for bookmaker in bookmakers:
-                    markets = bookmaker.get("markets") or {}
-                    match_odds = markets.get("match_odds") or {}
-
-                    try:
-                        home_odds = float(
-                            match_odds["home"]["opening"]
-                        )
-                        away_odds = float(
-                            match_odds["away"]["opening"]
-                        )
-                    except (KeyError, ValueError, TypeError):
-                        continue
-
-                    if not (
-                        math.isfinite(home_odds)
-                        and math.isfinite(away_odds)
-                        and home_odds > 1
-                        and away_odds > 1
-                    ):
-                        continue
-
-                    if home_odds == away_odds:
-                        favourite = "Level"
-                        favourite_odds = home_odds
-                    elif home_odds < away_odds:
-                        favourite = home
-                        favourite_odds = home_odds
-                    else:
-                        favourite = away
-                        favourite_odds = away_odds
-
-                    prices.append({
-                        "bookmaker": bookmaker.get(
-                            "bookmaker", "Unknown"
-                        ),
-                        "favourite": favourite,
-                        "odds": favourite_odds
-                    })
-
-                if prices:
-                    # Prefer Pinnacle if it has a valid quote.
-                    preferred = next(
-                        (
-                            p for p in prices
-                            if p["bookmaker"].lower()
-                            == "pinnacle"
-                        ),
-                        None
-                    )
-
-                    # Otherwise use the first valid bookmaker.
-                    selected = preferred or prices[0]
-
-                    results.append({
-                        "Match": f"{home} v {away}",
-                        "Favourite": selected["favourite"],
-                        "Opening odds": selected["odds"],
-                        "Bookmaker": selected["bookmaker"],
-                        "Bookmakers with prices": len(prices),
-                        "Status": "Opening price found"
-                    })
-
-                else:
-                    results.append({
-                        "Match": f"{home} v {away}",
-                        "Favourite": "Unknown",
-                        "Opening odds": None,
-                        "Bookmaker": "None",
-                        "Bookmakers with prices": 0,
-                        "Status": "No opening odds"
-                    })
-
-            except (requests.RequestException, ValueError):
-                results.append({
-                    "Match": f"{home} v {away}",
-                    "Favourite": "Unknown",
-                    "Opening odds": None,
-                    "Bookmaker": "None",
-                    "Bookmakers with prices": 0,
-                    "Status": "Odds request failed"
-                })
-
-        if results:
-            st.dataframe(
-                pd.DataFrame(results),
-                hide_index=True,
-                use_container_width=True
-            )
-        else:
-            st.info("No live matches returned.")
-
-    except (requests.RequestException, ValueError) as e:
-        st.error(f"Test failed: {e}")
-
-st.info(
-    "Research only. These are bookmaker opening "
-    "prices, not confirmed pre-kickoff closing odds. "
-    "Historical model compatibility remains unverified."
-)
+                    best = candidates.sort_values("Effective odds", ascending=False).iloc[0]
+                    comparison.append({"Historical market": market, "Status": "Candidate — verify",
+                                       "Bookmaker": best["Bookmaker"], "Back odds": best["Odds"],
+                                       "Effective odds": best["Effective odds"],
+                                       "Back size": best["Back size"]})
+            st.subheader("18-market candidate comparison")
+            st.dataframe(pd.DataFrame(comparison), hide_index=True, use_container_width=True)
+            with st.expander("All bookmaker selection paths"):
+                st.dataframe(all_prices.drop(columns=["Exchange"]), hide_index=True, use_container_width=True)
+            with st.expander("Raw live odds response"):
+                st.json(raw)
+            st.warning("These mappings are provisional; confirm market settlement and price freshness. Exchange commission applies to net winnings, and quoted liquidity may be unavailable.")
+else:
+    st.info("Press 'Find live matches for odds' when games are underway.")
