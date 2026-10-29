@@ -549,6 +549,131 @@ def stage15_holdout(history, max_tests=350, neighbours=150):
     return pd.DataFrame(summary), None
 
 
+# Stage 16 — rolling-origin paired validation; research only.
+def stage16_rolling_validation(history, max_tests_per_period=180, neighbours=150):
+    import numpy as np
+    date_col = next((c for c in ('Date', 'date', 'match_date', 'MatchDate')
+                     if c in history.columns), None)
+    if date_col is None:
+        return None, 'No historical match-date column.'
+    dates = pd.to_datetime(history[date_col], errors='coerce', dayfirst=True)
+    dated = history.loc[dates.notna()].copy()
+    dated['_s16_date'] = dates.loc[dates.notna()]
+    dated = dated.sort_values('_s16_date').reset_index(drop=True)
+    if len(dated) < 1500:
+        return None, 'Not enough dated matches for rolling validation.'
+    boundaries = [dated['_s16_date'].iloc[int(len(dated)*fraction)]
+                  for fraction in (.55, .70, .85)]
+    if len(set(boundaries)) != 3:
+        return None, 'Cannot create three separate date-based periods.'
+    methods = ['Original', 'Same-side fixed', 'Wider same-side', 'Weighted same-side']
+    markets = STAGE14_MARKETS
+    records = []
+    for period_number, start in enumerate(boundaries, 1):
+        end = boundaries[period_number] if period_number < 3 else None
+        train = dated[dated['_s16_date'] < start]
+        test = dated[dated['_s16_date'] >= start]
+        if end is not None:
+            test = test[test['_s16_date'] < end]
+        if len(train) < 500 or len(test) < 50:
+            continue
+        if len(test) > max_tests_per_period:
+            test = test.iloc[np.linspace(0, len(test)-1, max_tests_per_period, dtype=int)]
+        train_outcomes = {k: v.to_numpy(float) for k,v in market_outcomes(train).items()
+                          if k in markets}
+        test_outcomes = {k: v.to_numpy(float) for k,v in market_outcomes(test).items()
+                         if k in markets}
+        tr = train[['HTHG','HTAG','fav',xg1,xg2]].to_numpy(float)
+        tr_side = np.sign(train.B365A.to_numpy(float) - train.B365H.to_numpy(float))
+        te = test[['HTHG','HTAG','fav',xg1,xg2]].to_numpy(float)
+        te_side = np.sign(test.B365A.to_numpy(float) - test.B365H.to_numpy(float))
+        pred = {name:{} for name in methods}
+        for i, row in enumerate(te):
+            same_score = (tr[:,0] == row[0]) & (tr[:,1] == row[1])
+            same_side = same_score & (tr_side == te_side[i]) & (te_side[i] != 0)
+            for name, base, xwidth, owidth in [
+                ('Original', same_score, .40, .35),
+                ('Same-side fixed', same_side, .40, .35),
+                ('Wider same-side', same_side, .50, .50),
+            ]:
+                mask = (base & (np.abs(tr[:,2]-row[2]) <= owidth)
+                        & (np.abs(tr[:,3]-row[3]) <= xwidth)
+                        & (np.abs(tr[:,4]-row[4]) <= xwidth))
+                n = int(mask.sum())
+                if n >= 30:
+                    pred[name][i] = (n, {market: (train_outcomes[market][mask].sum()+1)/(n+2)
+                                          for market in markets})
+            indices = np.flatnonzero(same_side)
+            if len(indices):
+                delta = tr[indices,2:5] - row[2:5]
+                dist = (delta[:,0]/.35)**2 + (delta[:,1]/.35)**2 + (delta[:,2]/.35)**2
+                selected = np.argsort(dist,kind='stable')[:neighbours]
+                selected_indices = indices[selected]
+                weights = np.exp(-.5*dist[selected])
+                total = weights.sum()
+                ess = float(total**2/(weights@weights)) if total > 0 else 0
+                if ess >= 30:
+                    pred['Weighted same-side'][i] = (ess, {
+                        market: float(np.average(train_outcomes[market][selected_indices],weights=weights))
+                        for market in markets})
+        # Pair every method with original on identical fixtures.
+        for method in methods:
+            common = sorted(set(pred['Original']) & set(pred[method]))
+            if len(common) < 30:
+                continue
+            for market in markets:
+                actual = np.array([test_outcomes[market][i] for i in common])
+                original_p = np.array([pred['Original'][i][1][market] for i in common])
+                other_p = np.array([pred[method][i][1][market] for i in common])
+                loss_original = (original_p-actual)**2
+                loss_method = (other_p-actual)**2
+                difference = loss_original-loss_method
+                se = float(difference.std(ddof=1)/np.sqrt(len(common))) if len(common)>1 else 0
+                records.append({
+                    'Period': period_number, 'Period begins': str(start.date()),
+                    'Period ends': str((end if end is not None else test['_s16_date'].max()).date()),
+                    'Market': market, 'Method': method,
+                    'Paired fixtures': len(common),
+                    'Original coverage': len(pred['Original']),
+                    'Method coverage': len(pred[method]),
+                    'Original Brier': round(float(loss_original.mean()),5),
+                    'Method Brier': round(float(loss_method.mean()),5),
+                    'Improvement (+ better)': round(float(difference.mean()),5),
+                    'Approx 95% lower': round(float(difference.mean()-1.96*se),5),
+                    'Approx 95% upper': round(float(difference.mean()+1.96*se),5),
+                    'Mean method sample/ESS': round(float(np.mean([pred[method][i][0] for i in common])),1),
+                    'Training matches': len(train),
+                })
+    if not records:
+        return None, 'Insufficient paired predictions across the three periods.'
+    return pd.DataFrame(records), None
+
+
+st.subheader('Stage 16 · Rolling historical accuracy comparison')
+st.caption('Three chronological test periods, six priority markets. Research only; live scanner unchanged.')
+with st.expander('Compare original, same-side and weighted methods across three periods'):
+    st.write('Each method is evaluated against the original on identical fixtures, '
+             'using only matches before the test period for training. '
+             'The weighted method uses 150 nearest neighbours and requires at least 30 effective matches.')
+    if st.button('Run Stage 16 rolling validation', key='stage16_run'):
+        with st.spinner('Testing three historical periods…'):
+            table16, error16 = stage16_rolling_validation(HISTORY)
+        if error16:
+            st.warning(error16)
+        else:
+            st.session_state['stage16_results'] = table16
+    if 'stage16_results' in st.session_state:
+        table16 = st.session_state['stage16_results']
+        st.dataframe(table16, hide_index=True, use_container_width=True)
+        st.download_button('Download Stage 16 results CSV',
+                           table16.to_csv(index=False).encode('utf-8-sig'),
+                           'stage16_rolling_validation.csv', 'text/csv', key='stage16_download')
+    st.warning('These periods reuse earlier training data and are not independent experiments. '
+               'The approximate intervals ignore fixture clustering and multiple comparisons. '
+               'The model choices were informed by earlier tests on this database, so these '
+               'results are exploratory, not proof of an edge or future profitability.')
+
+
 st.subheader('Stage 15 · Weighted historical neighbours laboratory')
 st.caption('Research only: six priority markets; live scanner and tracker remain unchanged.')
 with st.expander('Explore weighted matches and effective sample size'):
