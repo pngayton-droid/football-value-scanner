@@ -2279,3 +2279,154 @@ if pre_matches:
             "We must confirm the endpoint definition, "
             "timestamp and market before using it."
         )
+
+# AUTOMATIC PRE-MATCH FAVOURITE ODDS TEST
+
+st.divider()
+st.header("🏁 Automatic Favourite Odds Test")
+
+st.caption(
+    "Reads opening match odds from TheStatsAPI. "
+    "Opening odds are not necessarily closing odds."
+)
+
+if st.button(
+    "Find Favourite Odds for Live Matches",
+    key="auto_favourite_test"
+):
+    try:
+        matches_payload = auto_get(
+            AUTO_BASE,
+            params={"status": "live", "per_page": 100}
+        )
+
+        matches = matches_payload.get("data") or []
+        results = []
+
+        for match in matches:
+            if not isinstance(match, dict):
+                continue
+
+            match_id = match.get("id")
+            if not match_id:
+                continue
+
+            home = (
+                match.get("home_team") or {}
+            ).get("name", "Home")
+
+            away = (
+                match.get("away_team") or {}
+            ).get("name", "Away")
+
+            try:
+                odds_payload = auto_get(
+                    f"{AUTO_BASE}/{match_id}/odds"
+                )
+
+                bookmakers = (
+                    odds_payload.get("data") or {}
+                ).get("bookmakers") or []
+
+                prices = []
+
+                for bookmaker in bookmakers:
+                    markets = bookmaker.get("markets") or {}
+                    match_odds = markets.get("match_odds") or {}
+
+                    try:
+                        home_odds = float(
+                            match_odds["home"]["opening"]
+                        )
+                        away_odds = float(
+                            match_odds["away"]["opening"]
+                        )
+                    except (KeyError, ValueError, TypeError):
+                        continue
+
+                    if not (
+                        math.isfinite(home_odds)
+                        and math.isfinite(away_odds)
+                        and home_odds > 1
+                        and away_odds > 1
+                    ):
+                        continue
+
+                    if home_odds == away_odds:
+                        favourite = "Level"
+                        favourite_odds = home_odds
+                    elif home_odds < away_odds:
+                        favourite = home
+                        favourite_odds = home_odds
+                    else:
+                        favourite = away
+                        favourite_odds = away_odds
+
+                    prices.append({
+                        "bookmaker": bookmaker.get(
+                            "bookmaker", "Unknown"
+                        ),
+                        "favourite": favourite,
+                        "odds": favourite_odds
+                    })
+
+                if prices:
+                    # Prefer Pinnacle if it has a valid quote.
+                    preferred = next(
+                        (
+                            p for p in prices
+                            if p["bookmaker"].lower()
+                            == "pinnacle"
+                        ),
+                        None
+                    )
+
+                    # Otherwise use the first valid bookmaker.
+                    selected = preferred or prices[0]
+
+                    results.append({
+                        "Match": f"{home} v {away}",
+                        "Favourite": selected["favourite"],
+                        "Opening odds": selected["odds"],
+                        "Bookmaker": selected["bookmaker"],
+                        "Bookmakers with prices": len(prices),
+                        "Status": "Opening price found"
+                    })
+
+                else:
+                    results.append({
+                        "Match": f"{home} v {away}",
+                        "Favourite": "Unknown",
+                        "Opening odds": None,
+                        "Bookmaker": "None",
+                        "Bookmakers with prices": 0,
+                        "Status": "No opening odds"
+                    })
+
+            except (requests.RequestException, ValueError):
+                results.append({
+                    "Match": f"{home} v {away}",
+                    "Favourite": "Unknown",
+                    "Opening odds": None,
+                    "Bookmaker": "None",
+                    "Bookmakers with prices": 0,
+                    "Status": "Odds request failed"
+                })
+
+        if results:
+            st.dataframe(
+                pd.DataFrame(results),
+                hide_index=True,
+                use_container_width=True
+            )
+        else:
+            st.info("No live matches returned.")
+
+    except (requests.RequestException, ValueError) as e:
+        st.error(f"Test failed: {e}")
+
+st.info(
+    "Research only. These are bookmaker opening "
+    "prices, not confirmed pre-kickoff closing odds. "
+    "Historical model compatibility remains unverified."
+)
