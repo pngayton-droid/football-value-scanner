@@ -457,6 +457,139 @@ def stage14_show(ht_home, ht_away, favourite_odds, home_xg, away_xg,
                'Side matching can reduce samples below the 100-match research threshold. '
                'No betting decision, scanner estimate, or tracker entry is changed.')
 
+# Stage 15 — weighted-neighbour research. No production settings are changed.
+def stage15_weighted_sample(pool, odds, home_xg, away_xg, k, scale_xg=.35, scale_odds=.35):
+    import numpy as np
+    if pool.empty:
+        return pool.iloc[:0], np.array([]), 0.
+    distances = (((pool[xg1].to_numpy(float) - home_xg) / scale_xg) ** 2 +
+                 ((pool[xg2].to_numpy(float) - away_xg) / scale_xg) ** 2 +
+                 ((pool.fav.to_numpy(float) - odds) / scale_odds) ** 2)
+    chosen = np.argsort(distances, kind='stable')[:k]
+    weights = np.exp(-.5 * distances[chosen])
+    total = weights.sum()
+    effective = float(total ** 2 / (weights @ weights)) if total else 0.
+    return pool.iloc[chosen], weights, effective
+
+
+def stage15_manual(ht_home, ht_away, odds, home_xg, away_xg, side, neighbours):
+    import numpy as np
+    pool = HISTORY[(HISTORY.HTHG == ht_home) & (HISTORY.HTAG == ht_away)]
+    if side == 'Home':
+        pool = pool[pool.B365H < pool.B365A]
+    elif side == 'Away':
+        pool = pool[pool.B365A < pool.B365H]
+    selected, weights, effective = stage15_weighted_sample(
+        pool, odds, home_xg, away_xg, neighbours)
+    rows = []
+    if len(selected):
+        outcomes = market_outcomes(selected)
+        for market in STAGE14_MARKETS:
+            probability = float(np.average(outcomes[market].to_numpy(float), weights=weights))
+            rows.append({'Market': market, 'Selected neighbours': len(selected),
+                         'Effective sample size': round(effective, 1),
+                         'Weighted historical %': round(probability * 100, 1),
+                         'Research threshold (ESS >= 100)': effective >= 100})
+    return pd.DataFrame(rows), len(pool)
+
+
+def stage15_holdout(history, max_tests=350, neighbours=150):
+    import numpy as np
+    date_col = next((c for c in ('Date', 'date', 'match_date', 'MatchDate')
+                     if c in history.columns), None)
+    if not date_col:
+        return None, 'No historical match-date column.'
+    dates = pd.to_datetime(history[date_col], errors='coerce', dayfirst=True)
+    dated = history.loc[dates.notna()].copy()
+    dated['_stage15_date'] = dates.loc[dates.notna()]
+    dated = dated.sort_values('_stage15_date')
+    if len(dated) < 1200:
+        return None, 'Not enough dated matches.'
+    cutoff = dated['_stage15_date'].iloc[int(len(dated) * .8)]
+    train = dated[dated['_stage15_date'] < cutoff]
+    test = dated[dated['_stage15_date'] >= cutoff]
+    if len(test) > max_tests:
+        test = test.iloc[np.linspace(0, len(test)-1, max_tests, dtype=int)]
+    records = []
+    for _, match in test.iterrows():
+        pool = train[(train.HTHG == match.HTHG) & (train.HTAG == match.HTAG)]
+        same = pool[(pool.B365H < pool.B365A) if match.B365H < match.B365A
+                    else (pool.B365A < pool.B365H)]
+        original = pool[pool.fav.between(max(1.01, match.fav-.35), match.fav+.35)]
+        original = original[original[xg1].between(max(0, match[xg1]-.40), match[xg1]+.40)]
+        original = original[original[xg2].between(max(0, match[xg2]-.40), match[xg2]+.40)]
+        # Compare on identical fixtures, and require both approaches to have meaningful evidence.
+        if len(original) < 30:
+            continue
+        chosen, weights, ess = stage15_weighted_sample(same, match.fav, match[xg1], match[xg2], neighbours)
+        if ess < 30:
+            continue
+        actual = market_outcomes(pd.DataFrame([match]))
+        orig_y = market_outcomes(original)
+        weighted_y = market_outcomes(chosen)
+        for market in STAGE14_MARKETS:
+            truth = float(actual[market].iloc[0])
+            original_p = (float(orig_y[market].sum()) + 1) / (len(original) + 2)
+            weighted_p = float(np.average(weighted_y[market].to_numpy(float), weights=weights))
+            records.append({'Market': market, 'Original loss': (original_p-truth)**2,
+                            'Weighted loss': (weighted_p-truth)**2,
+                            'Effective sample': ess})
+    if not records:
+        return None, 'Too few paired matches with at least 30 effective weighted neighbours.'
+    data = pd.DataFrame(records)
+    summary = []
+    for market, group in data.groupby('Market', sort=False):
+        n = len(group)
+        summary.append({'Market': market, 'Paired test matches': n,
+                        'Original Brier': round(group['Original loss'].mean(), 5),
+                        'Weighted Brier': round(group['Weighted loss'].mean(), 5),
+                        'Improvement (+ better)': round((group['Original loss']-group['Weighted loss']).mean(), 5),
+                        'Average effective sample': round(group['Effective sample'].mean(), 1),
+                        'Test start': str(cutoff.date())})
+    return pd.DataFrame(summary), None
+
+
+st.subheader('Stage 15 · Weighted historical neighbours laboratory')
+st.caption('Research only: six priority markets; live scanner and tracker remain unchanged.')
+with st.expander('Explore weighted matches and effective sample size'):
+    st.write('Uses the manual halftime score, odds and xG from the sidebar. '
+             'Matches must have the same halftime score and favourite side. '
+             'Closer odds and xG receive more weight; this does not create extra evidence.')
+    stage15_side = st.selectbox('Favourite side for Stage 15', ['Home', 'Away'],
+                                key='stage15_side')
+    stage15_k = st.slider('Maximum nearest historical matches', 50, 500, 150, 25,
+                          key='stage15_k')
+    stage15_table, stage15_pool = stage15_manual(
+        ht_h, ht_a, fav, xgh, xga, stage15_side, stage15_k)
+    st.write(f'Historical pool with matching score and favourite side: {stage15_pool:,}')
+    if stage15_table.empty:
+        st.warning('No historical matches for this scenario.')
+    else:
+        st.dataframe(stage15_table, hide_index=True, use_container_width=True)
+        st.download_button('Download Stage 15 weighted scenario CSV',
+                           stage15_table.to_csv(index=False).encode(),
+                           'stage15_weighted_scenario.csv', 'text/csv')
+    st.caption('Effective sample size accounts for unequal weights. A low ESS means '
+               'the probability is unstable even when many matches were selected.')
+with st.expander('Test weighted predictions on later matches'):
+    st.write('Paired chronological holdout: original fixed-width method versus '
+             '150 nearest same-side weighted neighbours, on the same later fixtures.')
+    if st.button('Run Stage 15 weighted holdout', key='stage15_run'):
+        with st.spinner('Testing weighted neighbours against later results…'):
+            table15, error15 = stage15_holdout(HISTORY)
+        if error15:
+            st.warning(error15)
+        else:
+            st.session_state['stage15_holdout'] = table15
+    if 'stage15_holdout' in st.session_state:
+        st.dataframe(st.session_state['stage15_holdout'], hide_index=True,
+                     use_container_width=True)
+        st.download_button('Download Stage 15 holdout CSV',
+                           st.session_state['stage15_holdout'].to_csv(index=False).encode(),
+                           'stage15_weighted_holdout.csv', 'text/csv')
+    st.warning('Exploratory holdout, not proof of an edge. Neighbour count and distance '
+               'scales have not been independently tuned; prices and returns are not tested.')
+
 st.subheader('Stage 14 · Parallel favourite-side research')
 st.caption('Compare original and improved matching methods without changing the live scanner.')
 with st.expander('Compare matching methods for the manual halftime scenario'):
