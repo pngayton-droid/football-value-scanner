@@ -808,11 +808,72 @@ def auto_halftime(match):
     )
 
 
+
 def auto_first_half_xg(payload):
+    """
+    Extract first-half xG from TheStatsAPI.
+
+    For live cumulative xG, only accept figures
+    when the API confirms the match is at halftime.
+    """
+
     data = payload.get("data") or payload
 
     if not isinstance(data, dict):
         return None, None
+
+    meta = data.get("meta") or {}
+
+    status = str(
+        meta.get("match_status")
+        or meta.get("period")
+        or ""
+    ).strip().lower()
+
+    halftime_statuses = {
+        "ht",
+        "halftime",
+        "half_time",
+        "half-time",
+        "half time"
+    }
+
+    # LIVE STATS FORMAT:
+    # data.stats.expected_goals.all
+    #
+    # At halftime, cumulative xG is the
+    # first-half total.
+
+    if status in halftime_statuses:
+        stats = data.get("stats") or {}
+
+        xg = stats.get("expected_goals") or {}
+
+        all_xg = xg.get("all") or {}
+
+        if isinstance(all_xg, dict):
+            try:
+                home = float(all_xg["home"])
+                away = float(all_xg["away"])
+
+                if (
+                    math.isfinite(home)
+                    and math.isfinite(away)
+                    and home >= 0
+                    and away >= 0
+                ):
+                    return home, away
+
+            except (
+                KeyError,
+                ValueError,
+                TypeError
+            ):
+                pass
+
+    # ALTERNATIVE FORMAT:
+    # Some responses explicitly contain
+    # first-half xG.
 
     candidates = [
         data.get("overview"),
@@ -836,21 +897,26 @@ def auto_first_half_xg(payload):
             continue
 
         try:
-            home_xg = float(first_half["home"])
-            away_xg = float(first_half["away"])
+            home = float(first_half["home"])
+            away = float(first_half["away"])
 
             if (
-                math.isfinite(home_xg)
-                and math.isfinite(away_xg)
-                and home_xg >= 0
-                and away_xg >= 0
+                math.isfinite(home)
+                and math.isfinite(away)
+                and home >= 0
+                and away >= 0
             ):
-                return home_xg, away_xg
+                return home, away
 
-        except (KeyError, TypeError, ValueError):
+        except (
+            KeyError,
+            ValueError,
+            TypeError
+        ):
             continue
 
     return None, None
+
 
 
 def auto_find_xg(match_id):
