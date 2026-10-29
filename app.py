@@ -44,34 +44,70 @@ for c in (xg1,xg2):
     if c not in d:
         st.error(f'Missing expected xG column: {c}')
         st.stop()
-d=d.dropna(subset=['HTHG','HTAG','FTHG','FTAG','B365H','B365A',xg1,xg2]).copy()
-d['fav']=d[['B365H','B365A']].min(axis=1)
-d=d[(d.HTHG==ht_h)&(d.HTAG==ht_a)&d.fav.between(max(1.01,fav-odds_width),fav+odds_width)&d[xg1].between(max(0,xgh-xg_width),xgh+xg_width)&d[xg2].between(max(0,xga-xg_width),xga+xg_width)]
-sh=d.FTHG-d.HTHG;sa=d.FTAG-d.HTAG;total=d.FTHG+d.FTAG
-markets={
- 'Home full-time win':d.FTHG>d.FTAG,
- 'Draw full-time':d.FTHG==d.FTAG,
- 'Away full-time win':d.FTHG<d.FTAG,
- 'Home scores in 2H':sh>=1,
- 'Away scores in 2H':sa>=1,
- 'Over 0.5 goals 2H':sh+sa>=1,
- 'Over 1.5 goals 2H':sh+sa>=2,
- 'Over 2.5 goals 2H':sh+sa>=3,
- 'Home wins 2H':sh>sa,
- 'Draw 2H':sh==sa,
- 'Away wins 2H':sh<sa,
- 'BTTS Yes FT':(d.FTHG>=1)&(d.FTAG>=1),
- 'Over 1.5 goals FT':total>=2,
- 'Under 1.5 goals FT':total<=1,
- 'Over 2.5 goals FT':total>=3,
- 'Under 2.5 goals FT':total<=2,
- 'Over 3.5 goals FT':total>=4,
- 'Under 3.5 goals FT':total<=3,
-}
+HISTORY = d.dropna(subset=['HTHG','HTAG','FTHG','FTAG','B365H','B365A',xg1,xg2]).copy()
+HISTORY['fav'] = HISTORY[['B365H','B365A']].min(axis=1)
+
+
+def comparable_matches(ht_home, ht_away, favourite_odds, home_xg, away_xg,
+                       xg_tolerance, odds_tolerance):
+    if any(v is None for v in (ht_home, ht_away, favourite_odds, home_xg, away_xg)):
+        return HISTORY.iloc[0:0]
+    return HISTORY[
+        (HISTORY.HTHG == ht_home) & (HISTORY.HTAG == ht_away)
+        & HISTORY.fav.between(max(1.01, favourite_odds - odds_tolerance),
+                              favourite_odds + odds_tolerance)
+        & HISTORY[xg1].between(max(0, home_xg - xg_tolerance), home_xg + xg_tolerance)
+        & HISTORY[xg2].between(max(0, away_xg - xg_tolerance), away_xg + xg_tolerance)
+    ]
+
+
+def market_outcomes(sample):
+    second_home = sample.FTHG - sample.HTHG
+    second_away = sample.FTAG - sample.HTAG
+    total_goals = sample.FTHG + sample.FTAG
+    return {
+        'Home full-time win': sample.FTHG > sample.FTAG,
+        'Draw full-time': sample.FTHG == sample.FTAG,
+        'Away full-time win': sample.FTHG < sample.FTAG,
+        'Home scores in 2H': second_home >= 1,
+        'Away scores in 2H': second_away >= 1,
+        'Over 0.5 goals 2H': second_home + second_away >= 1,
+        'Over 1.5 goals 2H': second_home + second_away >= 2,
+        'Over 2.5 goals 2H': second_home + second_away >= 3,
+        'Home wins 2H': second_home > second_away,
+        'Draw 2H': second_home == second_away,
+        'Away wins 2H': second_home < second_away,
+        'BTTS Yes FT': (sample.FTHG >= 1) & (sample.FTAG >= 1),
+        'Over 1.5 goals FT': total_goals >= 2,
+        'Under 1.5 goals FT': total_goals <= 1,
+        'Over 2.5 goals FT': total_goals >= 3,
+        'Under 2.5 goals FT': total_goals <= 2,
+        'Over 3.5 goals FT': total_goals >= 4,
+        'Under 3.5 goals FT': total_goals <= 3,
+    }
+
+
+def historical_estimates(sample):
+    estimates = []
+    for market, outcomes in market_outcomes(sample).items():
+        n = len(outcomes)
+        wins = int(outcomes.sum())
+        probability = wins / n if n else 0
+        estimates.append({
+            'Market': market, 'Matches': n, 'Wins': wins,
+            'Strike rate': round(probability * 100, 1) if n else None,
+            'Fair odds': round(1 / probability, 2) if probability else None,
+            'Wilson lower %': round(wilson_lower(wins, n) * 100, 1) if n else None,
+        })
+    return pd.DataFrame(estimates)
+
+
+d = comparable_matches(ht_h, ht_a, fav, xgh, xga, xg_width, odds_width)
+markets = market_outcomes(d)
 st.subheader(f'{home} v {away} · HT {ht_h}–{ht_a}')
 a,b,c=st.columns(3)
 a.metric('Comparable matches',f'{len(d):,}')
-b.metric('Historical data', '32,653 matches (source file)')
+b.metric('Historical data', f'{len(HISTORY):,} usable / 32,653 source')
 c.metric('Market types',len(markets))
 st.warning('Screening estimates only: these historical matches are not a calibrated predictive model. Overlapping markets, odds selection and out-of-sample validation matter.')
 st.markdown('**Enter available Betfair back prices for the markets you want to check.** Leave other prices at zero.')
@@ -229,12 +265,30 @@ if st.button("🔍 Run Complete Halftime Scan", key="clean_ht_scan"):
                 complete = (ht_h is not None and ht_a is not None and xgh is not None
                             and xga is not None and opening is not None
                             and favourite in ("Home", "Away") and bool(books))
+                # Use the SAME filtering and market functions as the manual scanner.
+                estimates = None
+                if (ht_h is not None and ht_a is not None and xgh is not None
+                        and xga is not None and opening is not None):
+                    try:
+                        sample = comparable_matches(int(ht_h), int(ht_a), opening,
+                                                    xgh, xga, xg_width, odds_width)
+                        estimates = historical_estimates(sample)
+                    except (ValueError, TypeError):
+                        issues.append('Historical comparison: invalid score or inputs')
+                if estimates is not None:
+                    if 'auto_estimates' not in st.session_state:
+                        st.session_state['auto_estimates'] = {}
+                    st.session_state['auto_estimates'][match_id] = estimates
                 rows.append({
                     "Match": match_name(m), "Match ID": match_id,
                     "HT score": f"{ht_h}-{ht_a}" if ht_h is not None and ht_a is not None else "Unavailable",
                     "Home HT xG": xgh, "Away HT xG": xga,
                     "Opening favourite": favourite, "Opening odds": opening,
                     "Opening bookmaker": source, "Opening sources": source_count,
+                    "Comparable matches": (int(estimates['Matches'].iloc[0])
+                                           if estimates is not None else None),
+                    "Sample sufficient": (bool(estimates['Matches'].iloc[0] >= min_n)
+                                          if estimates is not None else False),
                     "Live bookmakers": len(books),
                     "Betfair Exchange": any("betfair exchange" in b.lower() for b in books),
                     "Data status": "Inputs found — verify" if complete else "Incomplete",
@@ -242,6 +296,23 @@ if st.button("🔍 Run Complete Halftime Scan", key="clean_ht_scan"):
                 })
             report = pd.DataFrame(rows)
             st.dataframe(report, hide_index=True, use_container_width=True)
+            st.subheader('Historical fair odds for detected halftime matches')
+            st.caption('Calculated with the exact same filters as the manual scanner. '
+                       'Strike rates are descriptive, not validated predictions. '
+                       'Opening odds may differ from the historical pre-match odds definition.')
+            for item in rows:
+                match_id = item['Match ID']
+                estimates = st.session_state.get('auto_estimates', {}).get(match_id)
+                if estimates is None:
+                    continue
+                with st.expander(f"{item['Match']} · {item['Comparable matches']} comparable matches"):
+                    if item['Comparable matches'] < min_n:
+                        st.warning('Insufficient historical sample for the selected minimum.')
+                    st.dataframe(estimates, hide_index=True, use_container_width=True)
+                    st.download_button('Download 18-market estimates',
+                                       estimates.to_csv(index=False).encode(),
+                                       f'historical_{match_id}.csv', 'text/csv',
+                                       key=f'download_estimates_{match_id}')
             st.download_button("Download halftime results", report.to_csv(index=False).encode(),
                                "halftime_combined.csv", "text/csv")
     except (requests.RequestException, ValueError, KeyError, TypeError) as e:
