@@ -2134,3 +2134,148 @@ if compare_matches:
             st.error(
                 f"Comparison failed: {e}"
             )
+
+# PRE-MATCH ODDS AVAILABILITY DIAGNOSTIC
+
+st.divider()
+st.header("🕒 Pre-Match Odds Diagnostic")
+
+st.caption(
+    "Tests whether original pre-kickoff odds can "
+    "be retrieved for matches already underway. "
+    "Does not treat live odds as pre-match odds."
+)
+
+PRE_BASE = "https://api.thestatsapi.com/api/football/matches"
+
+if "prematch_test_matches" not in st.session_state:
+    st.session_state.prematch_test_matches = []
+
+if st.button(
+    "Find Matches for Pre-Match Test",
+    key="prematch_find"
+):
+    try:
+        response = requests.get(
+            PRE_BASE,
+            headers={
+                "Authorization":
+                f"Bearer {st.secrets['STATS_API_KEY']}"
+            },
+            params={
+                "status": "live",
+                "per_page": 100
+            },
+            timeout=20
+        )
+
+        response.raise_for_status()
+        payload = response.json()
+        matches = payload.get("data") or []
+
+        if not isinstance(matches, list):
+            st.error("Unexpected match response.")
+        else:
+            st.session_state.prematch_test_matches = [
+                m for m in matches
+                if isinstance(m, dict) and m.get("id")
+            ]
+
+            st.success(
+                f"Found {len(st.session_state.prematch_test_matches)} "
+                "live matches."
+            )
+
+    except (requests.RequestException, ValueError) as e:
+        st.error(f"Match search failed: {e}")
+
+
+pre_matches = st.session_state.prematch_test_matches
+
+if pre_matches:
+    pre_options = {}
+
+    for match in pre_matches:
+        home = (
+            match.get("home_team") or {}
+        ).get("name", "Home")
+
+        away = (
+            match.get("away_team") or {}
+        ).get("name", "Away")
+
+        match_id = str(match["id"])
+
+        label = f"{home} v {away} [{match_id}]"
+        pre_options[label] = match
+
+    chosen = st.selectbox(
+        "Choose live match",
+        list(pre_options),
+        key="prematch_choose"
+    )
+
+    selected = pre_options[chosen]
+    selected_id = str(selected["id"])
+
+    st.write(
+        "Current match status:",
+        selected.get("live")
+    )
+
+    if st.button(
+        "Investigate Original Odds",
+        key="prematch_investigate"
+    ):
+        headers = {
+            "Authorization":
+            f"Bearer {st.secrets['STATS_API_KEY']}"
+        }
+
+        # The following endpoints are exploratory.
+        # Their availability is not yet confirmed.
+        endpoints = [
+            ("Match details", f"{PRE_BASE}/{selected_id}"),
+            (
+                "Possible pre-match odds endpoint",
+                f"{PRE_BASE}/{selected_id}/odds/prematch"
+            ),
+            (
+                "Possible general odds endpoint",
+                f"{PRE_BASE}/{selected_id}/odds"
+            )
+        ]
+
+        for label, url in endpoints:
+            st.subheader(label)
+
+            try:
+                response = requests.get(
+                    url,
+                    headers=headers,
+                    timeout=20
+                )
+
+                st.write(
+                    "HTTP status:",
+                    response.status_code
+                )
+
+                if response.ok:
+                    try:
+                        payload = response.json()
+                        st.json(payload)
+                    except ValueError:
+                        st.code(response.text[:2000])
+                else:
+                    st.code(response.text[:1000])
+
+            except requests.RequestException as e:
+                st.error(f"Request failed: {e}")
+
+        st.warning(
+            "These tests do not establish whether "
+            "an odds quote is pre-match or in-play. "
+            "We must confirm the endpoint definition, "
+            "timestamp and market before using it."
+        )
