@@ -1,4 +1,5 @@
 
+
 import os
 import json
 import requests
@@ -35,18 +36,36 @@ for match in matches:
         timeout=25,
     )
 
-    print("Match ID:", match_id)
+    print("\nMatch ID:", match_id)
     print("HTTP status:", odds.status_code)
 
     if odds.ok:
         data = odds.json().get("data", {})
+
         for book in data.get("bookmakers", []):
-            print("Bookmaker:", book.get("bookmaker"))
-            print("Markets:", list(book.get("markets", {}).keys()))
+            print("\nBookmaker:", book.get("bookmaker"))
+
+            markets = book.get("markets", {})
+
+            for market in [
+                "match_odds",
+                "second_half_result",
+                "btts_second_half",
+                "team_total_goals",
+                "correct_score",
+            ]:
+                prices = markets.get(market)
+
+                if prices:
+                    print(
+                        market,
+                        json.dumps(prices)[:1500]
+                    )
     else:
         print("Response:", odds.text[:300])
 
     tested += 1
+
     if tested >= 3:
         break
 
