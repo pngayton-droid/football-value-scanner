@@ -282,6 +282,8 @@ if st.button("🔍 Run Complete Halftime Scan", key="clean_ht_scan"):
                     st.write({"Match": match_name(m), "live": m.get("live")})
         else:
             rows = []
+            st.session_state["research_live_quotes"] = {}
+            st.session_state["auto_estimates"] = {}
             for m in halftime:
                 match_id = str(m["id"])
                 score = m.get("score") or {}
@@ -303,7 +305,9 @@ if st.button("🔍 Run Complete Halftime Scan", key="clean_ht_scan"):
                 except (requests.RequestException, ValueError, TypeError) as e:
                     issues.append(f"Opening odds: {e}")
                 try:
-                    books = bookmaker_names(api_get(f"/{match_id}/odds/live"))
+                    live_odds_payload = api_get(f"/{match_id}/odds/live")
+                    books = bookmaker_names(live_odds_payload)
+                    st.session_state["research_live_quotes"][match_id] = live_odds_payload
                 except (requests.RequestException, ValueError, TypeError) as e:
                     issues.append(f"Live odds: {e}")
                 complete = (ht_h is not None and ht_a is not None and xgh is not None
@@ -338,6 +342,7 @@ if st.button("🔍 Run Complete Halftime Scan", key="clean_ht_scan"):
                     "Data status": "Inputs found — verify" if complete else "Incomplete",
                     "Request errors": "; ".join(issues),
                 })
+            st.session_state["research_ht_rows"] = rows
             report = pd.DataFrame(rows)
             st.dataframe(report, hide_index=True, use_container_width=True)
             st.subheader('Historical fair odds for detected halftime matches')
@@ -493,3 +498,75 @@ if odds_matches:
             st.warning("These mappings are provisional; confirm market settlement and price freshness. Exchange commission applies to net winnings, and quoted liquidity may be unavailable.")
 else:
     st.info("Press 'Find live matches for odds' when games are underway.")
+
+
+# Research-only comparison, built from the SAME halftime snapshot used above.
+# No additional live requests and no claim that a quote remains executable.
+st.divider()
+st.header("📊 Halftime Value Research — provisional")
+st.caption("Matches from the most recent complete halftime scan only. Historical strike rates are not calibrated predictions. "
+           "Quotes may be stale, suspended, or unavailable; these are NOT betting signals.")
+
+research_rows = []
+research_missing = []
+for item in st.session_state.get("research_ht_rows", []):
+    mid = item["Match ID"]
+    estimates = st.session_state.get("auto_estimates", {}).get(mid)
+    payload = st.session_state.get("research_live_quotes", {}).get(mid)
+    if estimates is None or payload is None:
+        research_missing.append(f"{item['Match']}: missing historical estimates or live prices")
+        continue
+    quotes = quote_rows(payload, commission)
+    if quotes.empty:
+        research_missing.append(f"{item['Match']}: no usable quote records")
+        continue
+    for _, est in estimates.iterrows():
+        market = est["Market"]
+        path = MARKET_PATHS.get(market)
+        if path is None:
+            continue
+        candidates = quotes.loc[
+            (quotes["Market"] == path[0]) &
+            (quotes["Selection"] == "/".join(path[1:]))
+        ].dropna(subset=["Effective odds"])
+        if candidates.empty:
+            continue
+        best = candidates.sort_values("Effective odds", ascending=False).iloc[0]
+        n = int(est["Matches"])
+        wins = int(est["Wins"])
+        prob = wins / n if n else None
+        effective = float(best["Effective odds"])
+        estimated_roi = (100 * (prob * effective - 1)) if prob is not None else None
+        lower_roi = (100 * (wilson_lower(wins, n) * effective - 1)) if n else None
+        research_rows.append({
+            "Match": item["Match"], "HT score": item["HT score"],
+            "Market": market, "Bookmaker": best["Bookmaker"],
+            "Quoted odds": round(float(best["Odds"]), 3),
+            "After commission": round(effective, 3),
+            "Fair odds (historical)": est["Fair odds"],
+            "Historical win %": est["Strike rate"],
+            "Comparable matches": n,
+            "Estimated ROI %": round(estimated_roi, 1) if estimated_roi is not None else None,
+            "Wilson lower ROI %": round(lower_roi, 1) if lower_roi is not None else None,
+            "Sample sufficient": n >= min_n,
+            "Mapping": "Provisional — verify settlement",
+            "Price status": "Unverified / may be delayed",
+        })
+
+if research_rows:
+    research = pd.DataFrame(research_rows)
+    research = research.sort_values("Estimated ROI %", ascending=False, na_position="last")
+    st.warning("RESEARCH ONLY: Every displayed mapping and price remains unverified. "
+               "A positive estimated ROI is NOT evidence of a genuine edge. "
+               "Opening favourite prices may not match historical closing-price definitions.")
+    st.dataframe(research, hide_index=True, use_container_width=True)
+    st.download_button("Download research comparison CSV", research.to_csv(index=False).encode(),
+                       "halftime_value_research.csv", "text/csv", key="download_research_comparison")
+    st.caption("Missing markets are omitted, not assigned invented prices. The five unmapped markets remain in historical research.")
+else:
+    st.info("No comparable halftime price research yet. Run the Complete Halftime Scan when matches are at halftime "
+            "and both teams' xG is available.")
+if research_missing:
+    with st.expander("Why some halftime matches are missing"):
+        for reason in research_missing:
+            st.write(reason)
