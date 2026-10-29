@@ -1,4 +1,5 @@
 import math
+import re
 from pathlib import Path
 import pandas as pd
 import streamlit as st
@@ -138,6 +139,121 @@ st.divider()
 st.header("🔎 Automatic Halftime Scanner")
 st.caption("Checks paginated live matches for halftime, xG, opening prices and bookmaker coverage. No automatic betting signals.")
 MAX_LIVE_PAGES = st.slider("Maximum live fixture pages to check", 1, 10, 3, help="Each page is one API request (up to 100 matches). Increase only when needed on busy matchdays.")
+SCAN_SCOPE = st.radio("Competition coverage", ["All leagues (recommended)", "Priorities 1–3 only", "Priority 1 only"], horizontal=True, help="All leagues keeps maximum coverage; priority tiers determine display order. Unknown competition names are never silently classified as major leagues.")
+st.caption("Priorities affect display and optional filtering only. Fixture pages are collected before filtering; a page limit can still cause incomplete coverage.")
+
+# Display classification uses league/country text only, not unverified provider IDs.
+# The provider's actual competition fields are shown in diagnostics below.
+PRIORITY_ONE = {
+    'england': ['premier league', 'championship', 'league one', 'league two', 'efl league 1', 'efl league 2'],
+    'italy': ['serie a'], 'france': ['ligue 1', 'ligue one'],
+    'germany': ['bundesliga'], 'spain': ['la liga', 'laliga', 'primera division'],
+    'netherlands': ['eredivisie'], 'portugal': ['primeira liga', 'liga portugal'],
+    'belgium': ['pro league', 'first division a', 'jupiler'],
+    'scotland': ['premiership', 'scottish premier'],
+}
+PRIORITY_TWO = {
+    'england': ['national league', 'national league north', 'national league south', 'women s super league'],
+    'germany': ['2. bundesliga', '2 bundesliga', 'zweite bundesliga'],
+    'italy': ['serie b'], 'france': ['ligue 2'],
+    'spain': ['segunda', 'la liga 2', 'laliga 2'],
+    'netherlands': ['eerste divisie'], 'scotland': ['championship'],
+    'turkey': ['super lig', 'süper lig'], 'austria': ['bundesliga'],
+    'switzerland': ['super league'], 'denmark': ['superliga'],
+    'norway': ['eliteserien'], 'sweden': ['allsvenskan'],
+}
+PRIORITY_THREE = ['champions league', 'europa league', 'conference league',
+                  'fa cup', 'efl cup', 'carabao cup', 'copa del rey', 'coppa italia',
+                  'dfb pokal', 'coupe de france', 'scottish cup']
+
+
+def normalise_label(value):
+    value = str(value or '').casefold().replace('ü', 'u').replace('é', 'e')
+    return re.sub(r'[^a-z0-9]+', ' ', value).strip()
+
+
+def competition_details(match):
+    # Provider formats may differ. Retain raw fields in coverage diagnostics.
+    raw = None
+    for key in ('competition', 'league', 'tournament'):
+        if match.get(key):
+            raw = match[key]
+            break
+    if isinstance(raw, dict):
+        name = raw.get('name') or raw.get('title') or raw.get('short_name') or ''
+        country = raw.get('country') or raw.get('country_name') or ''
+        if isinstance(country, dict):
+            country = country.get('name') or ''
+        ident = raw.get('id') or raw.get('competition_id') or ''
+    else:
+        name, country, ident = raw or '', '', ''
+    name = name or match.get('league_name') or match.get('competition_name') or match.get('tournament_name') or ''
+    country = country or match.get('country_name') or match.get('country') or ''
+    if isinstance(country, dict):
+        country = country.get('name') or ''
+    ident = ident or match.get('league_id') or match.get('competition_id') or ''
+    return str(name), str(country), str(ident)
+
+
+def competition_priority(match):
+    name, country, _ = competition_details(match)
+    n, c = normalise_label(name), normalise_label(country)
+    if not n:
+        return 4, 'Unknown competition'
+    # Continental competitions don't have a single country.
+    if any(normalise_label(term) in n for term in PRIORITY_THREE):
+        return 3, 'Priority 3 — continental/cup'
+    # If country is missing, don't guess based on generic league names.
+    if not c:
+        return 4, 'Unclassified — missing country'
+    for country_key, names in PRIORITY_TWO.items():
+        if normalise_label(country_key) in c and any(normalise_label(term) == n for term in names):
+            return 2, 'Priority 2'
+    for country_key, names in PRIORITY_ONE.items():
+        if normalise_label(country_key) in c and any(normalise_label(term) == n for term in names):
+            return 1, 'Priority 1'
+    return 4, 'Other / unclassified'
+
+
+def ordered_matches(matches):
+    return sorted(matches, key=lambda m: (competition_priority(m)[0],
+                                          normalise_label(competition_details(m)[0]),
+                                          match_name(m)))
+
+
+def selected_matches(matches):
+    if SCAN_SCOPE == 'All leagues (recommended)':
+        return ordered_matches(matches)
+    limit = 1 if SCAN_SCOPE == 'Priority 1 only' else 3
+    return ordered_matches([m for m in matches if competition_priority(m)[0] <= limit])
+
+
+def show_coverage(matches, title='Live fixture coverage'):
+    st.subheader(title)
+    rows = []
+    for m in matches:
+        league, country, ident = competition_details(m)
+        _, tier = competition_priority(m)
+        rows.append({'Priority': tier, 'Country': country or 'Not supplied',
+                     'Competition': league or 'Not supplied',
+                     'Competition ID': ident or 'Not supplied',
+                     'Match': match_name(m), 'At halftime': is_halftime(m)})
+    if rows:
+        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    else:
+        st.info('No live fixtures returned.')
+    unknown = sum(competition_priority(m)[0] == 4 for m in matches)
+    if unknown:
+        st.caption(f'{unknown} fixtures are outside the named priorities or have incomplete competition metadata. All-leagues mode retains them.')
+    with st.expander('Provider competition fields — inspect before adding exact IDs'):
+        for m in matches[:5]:
+            st.json({'match': match_name(m),
+                     'competition': m.get('competition'), 'league': m.get('league'),
+                     'tournament': m.get('tournament'),
+                     'league_name': m.get('league_name'),
+                     'country': m.get('country'),
+                     'competition_id': m.get('competition_id')})
+
 API_BASE = "https://api.thestatsapi.com/api/football/matches"
 HT_STATES = {"ht", "halftime", "half_time", "half-time", "half time", "half_time_break"}
 
@@ -157,6 +273,7 @@ def live_matches():
     """Fetch live fixtures across pages; do not silently treat a partial scan as complete."""
     found = {}
     total_pages = None
+    page = 0
     for page in range(1, MAX_LIVE_PAGES + 1):
         payload = api_get(params={"status": "live", "per_page": 100, "page": page})
         data = payload.get("data")
@@ -175,6 +292,9 @@ def live_matches():
             break
         if len(data) < 100:
             break
+    st.session_state["live_coverage_pages_checked"] = page
+    st.session_state["live_coverage_reported_pages"] = total_pages
+    st.session_state["live_coverage_all_matches"] = list(found.values())
     if total_pages is not None and total_pages > MAX_LIVE_PAGES:
         st.warning(f"Partial fixture scan: API reports {total_pages} pages, but the limit is {MAX_LIVE_PAGES}. Increase the limit to cover every match.")
     elif total_pages is None and len(data) == 100 and page == MAX_LIVE_PAGES:
@@ -254,7 +374,7 @@ st.subheader("🧪 Halftime xG diagnostics")
 st.caption("Choose a live match to inspect the provider's status and expected-goals fields. No API key is displayed.")
 if st.button("Find matches for xG diagnostics", key="xg_diag_find"):
     try:
-        st.session_state["xg_diag_matches"] = live_matches()
+        st.session_state["xg_diag_matches"] = selected_matches(live_matches())
     except (requests.RequestException, ValueError, KeyError) as exc:
         st.error(f"Could not retrieve live matches: {exc}")
 
@@ -292,8 +412,20 @@ if _diag_matches:
 
 if st.button("🔍 Run Complete Halftime Scan", key="clean_ht_scan"):
     try:
-        matches = live_matches()
+        # Clear any previous snapshot so old prices cannot masquerade as current.
+        st.session_state['research_ht_rows'] = []
+        st.session_state['research_live_quotes'] = {}
+        st.session_state['auto_estimates'] = {}
+        all_matches = live_matches()
+        matches = selected_matches(all_matches)
         halftime = [m for m in matches if is_halftime(m)]
+        st.write(f"Fixture pages actually checked: {st.session_state.get('live_coverage_pages_checked', 'Unknown')}")
+        reported = st.session_state.get('live_coverage_reported_pages')
+        st.write(f"API-reported total pages: {reported if reported is not None else 'Not supplied'}")
+        st.write(f"Live matches returned (before filtering): {len(all_matches)}")
+        st.write(f"Matches in selected scope: {len(matches)}")
+        with st.expander('Competition coverage and priority diagnostics'):
+            show_coverage(all_matches)
         st.write(f"Live matches returned: {len(matches)}")
         st.write(f"Halftime matches detected: {len(halftime)}")
         if not halftime:
@@ -348,7 +480,10 @@ if st.button("🔍 Run Complete Halftime Scan", key="clean_ht_scan"):
                     if 'auto_estimates' not in st.session_state:
                         st.session_state['auto_estimates'] = {}
                     st.session_state['auto_estimates'][match_id] = estimates
+                league, country, _ = competition_details(m)
+                _, priority = competition_priority(m)
                 rows.append({
+                    "Priority": priority, "Competition": league or "Not supplied", "Country": country or "Not supplied",
                     "Match": match_name(m), "Match ID": match_id,
                     "HT score": f"{ht_h}-{ht_a}" if ht_h is not None and ht_a is not None else "Unavailable",
                     "Home HT xG": xgh, "Away HT xG": xga,
@@ -470,7 +605,7 @@ def quote_rows(payload, commission):
 
 if st.button("Find live matches for odds", key="clean_find_odds"):
     try:
-        st.session_state["clean_live_matches"] = live_matches()
+        st.session_state["clean_live_matches"] = selected_matches(live_matches())
     except (requests.RequestException, ValueError, KeyError, TypeError) as e:
         st.error(f"Live match search failed: {e}")
 
