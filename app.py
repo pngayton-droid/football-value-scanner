@@ -64,6 +64,87 @@ def comparable_matches(ht_home, ht_away, favourite_odds, home_xg, away_xg,
     ]
 
 
+
+
+def stage11_diagnostics(ht_home, ht_away, favourite_odds, home_xg, away_xg,
+                        xg_tolerance, odds_tolerance):
+    """Descriptive funnel and sensitivity only; never changes production estimates."""
+    if any(v is None for v in (ht_home, ht_away, favourite_odds, home_xg, away_xg)):
+        return None, None, None
+    exact = HISTORY[(HISTORY.HTHG == int(ht_home)) & (HISTORY.HTAG == int(ht_away))]
+    odds = exact[exact.fav.between(max(1.01, favourite_odds - odds_tolerance),
+                                   favourite_odds + odds_tolerance)]
+    hx = odds[odds[xg1].between(max(0, home_xg - xg_tolerance), home_xg + xg_tolerance)]
+    ax = hx[hx[xg2].between(max(0, away_xg - xg_tolerance), away_xg + xg_tolerance)]
+    funnel = pd.DataFrame([
+        ('Usable historical records', len(HISTORY)),
+        ('Exact halftime score', len(exact)),
+        ('Plus favourite odds band', len(odds)),
+        ('Plus home HT xG band', len(hx)),
+        ('Plus away HT xG band (current sample)', len(ax)),
+    ], columns=['Filter stage', 'Remaining matches'])
+    scenarios = [
+        ('Current (unchanged)', xg_tolerance, odds_tolerance),
+        ('xG +0.10', min(1.50, xg_tolerance + 0.10), odds_tolerance),
+        ('xG +0.20', min(1.50, xg_tolerance + 0.20), odds_tolerance),
+        ('Odds +0.15', xg_tolerance, min(2.00, odds_tolerance + 0.15)),
+        ('Odds +0.30', xg_tolerance, min(2.00, odds_tolerance + 0.30)),
+        ('Both modestly wider', min(1.50, xg_tolerance + 0.10),
+         min(2.00, odds_tolerance + 0.15)),
+    ]
+    key_markets = ['Home full-time win', 'Draw full-time', 'Away full-time win',
+                   'Home scores in 2H', 'Away scores in 2H',
+                   'Home wins 2H', 'Away wins 2H', 'Over 1.5 goals 2H']
+    base_probs = market_outcomes(ax)
+    records = []
+    for name, xwidth, owidth in scenarios:
+        sample = comparable_matches(ht_home, ht_away, favourite_odds,
+                                    home_xg, away_xg, xwidth, owidth)
+        outcomes = market_outcomes(sample)
+        changes = []
+        for market in key_markets:
+            if len(sample) and len(ax):
+                changes.append(abs(float(outcomes[market].mean()) -
+                                   float(base_probs[market].mean())) * 100)
+        records.append({
+            'Scenario': name, 'xG tolerance': round(xwidth, 2),
+            'Odds tolerance': round(owidth, 2), 'Matches': len(sample),
+            'Extra matches': len(sample) - len(ax),
+            'Largest change in 8 key markets (pp)': round(max(changes), 1) if changes else None,
+        })
+    sensitivity = pd.DataFrame(records)
+    # Check whether the historical favourite was on the same home/away side as the live favourite.
+    home_fav = int((ax.B365H < ax.B365A).sum())
+    away_fav = int((ax.B365A < ax.B365H).sum())
+    fav_side = pd.DataFrame([{'Historical favourite side': 'Home', 'Matches': home_fav},
+                             {'Historical favourite side': 'Away', 'Matches': away_fav},
+                             {'Historical favourite side': 'Equal opening prices',
+                              'Matches': len(ax) - home_fav - away_fav}])
+    return funnel, sensitivity, fav_side
+
+
+def show_stage11_diagnostics(ht_home, ht_away, favourite_odds, home_xg, away_xg,
+                             xg_tolerance, odds_tolerance):
+    funnel, sensitivity, fav_side = stage11_diagnostics(
+        ht_home, ht_away, favourite_odds, home_xg, away_xg,
+        xg_tolerance, odds_tolerance)
+    if funnel is None:
+        st.info('Need a halftime score, both xG values and favourite odds for Stage 11.')
+        return
+    st.markdown('**Where the historical matches disappear**')
+    st.dataframe(funnel, hide_index=True, use_container_width=True)
+    st.markdown('**Sensitivity experiments (research only)**')
+    st.dataframe(sensitivity, hide_index=True, use_container_width=True)
+    st.caption('Percentage-point changes compare the same eight market outcomes against '
+               'the current sample. Small changes are NOT proof of equal predictive quality; '
+               'overlapping samples, selection effects and out-of-sample validation matter. '
+               'The live opportunity tracker still uses the original tolerances and minimum sample.')
+    st.markdown('**Home/away favourite mix in the current sample**')
+    st.dataframe(fav_side, hide_index=True, use_container_width=True)
+    st.warning('The current historical filter matches the favourite PRICE, not which team '
+               'was favourite. This diagnostic identifies the mix but does not silently '
+               'change the matching method.')
+
 def market_outcomes(sample):
     second_home = sample.FTHG - sample.HTHG
     second_away = sample.FTAG - sample.HTAG
@@ -104,6 +185,10 @@ def historical_estimates(sample):
         })
     return pd.DataFrame(estimates)
 
+
+st.subheader('Stage 11 · Historical sample quality laboratory')
+with st.expander('Inspect filter losses and safer sample-width experiments'):
+    show_stage11_diagnostics(ht_h, ht_a, fav, xgh, xga, xg_width, odds_width)
 
 d = comparable_matches(ht_h, ht_a, fav, xgh, xga, xg_width, odds_width)
 markets = market_outcomes(d)
@@ -622,6 +707,12 @@ if st.button("🔍 Run Complete Halftime Scan", key="clean_ht_scan"):
                 if estimates is None:
                     continue
                 with st.expander(f"{item['Match']} · {item['Comparable matches']} comparable matches"):
+                    with st.expander('Stage 11 · Why this sample size?'):
+                        show_stage11_diagnostics(
+                            int(item['HT score'].split('-')[0]),
+                            int(item['HT score'].split('-')[1]),
+                            item['Opening odds'], item['Home HT xG'], item['Away HT xG'],
+                            xg_width, odds_width)
                     if item['Comparable matches'] < min_n:
                         st.warning('Insufficient historical sample for the selected minimum.')
                     st.dataframe(estimates, hide_index=True, use_container_width=True)
