@@ -652,17 +652,52 @@ def stage16_rolling_validation(history, max_tests_per_period=180, neighbours=150
 # Stage 17 — read-only view of GitHub Actions' persisted prospective observations.
 st.subheader('Stage 17 · Automatic prospective prediction journal')
 st.caption('Predictions are recorded at halftime by a separate scheduled GitHub Action, then settled from the provider. No bets are placed.')
+import json as _json17
 _stage17_file = Path(__file__).parent / 'data' / 'stage17_predictions.jsonl'
-if not _stage17_file.exists() or not _stage17_file.stat().st_size:
-    st.info('No automatic observations yet. The GitHub Actions collector must be enabled and successfully run during halftime.')
+_stage17_url = ('https://raw.githubusercontent.com/pngayton-droid/'
+                'football-value-scanner/main/data/stage17_predictions.jsonl')
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _load_stage17_remote():
+    """Read the public GitHub journal; never send API keys or write to GitHub."""
+    response = requests.get(_stage17_url, timeout=8,
+                            headers={'Accept': 'text/plain'})
+    response.raise_for_status()
+    if len(response.content) > 10_000_000:
+        raise ValueError('Journal exceeds 10 MB display limit')
+    return response.text
+
+if st.button('Refresh Stage 17 journal', key='stage17_refresh'):
+    _load_stage17_remote.clear()
+
+_stage17_source = 'GitHub (latest saved journal; refreshes at most every 2 minutes)'
+try:
+    _stage17_text = _load_stage17_remote()
+except (requests.RequestException, ValueError) as _stage17_error:
+    _stage17_source = 'Local deployed file (GitHub could not be reached)'
+    _stage17_text = (_stage17_file.read_text(encoding='utf-8')
+                     if _stage17_file.exists() else '')
+    st.caption('GitHub journal temporarily unavailable; showing the deployed copy if present.')
+
+_records17 = []
+_invalid17 = 0
+for _line17 in _stage17_text.splitlines():
+    if not _line17.strip():
+        continue
+    try:
+        _item17 = _json17.loads(_line17)
+        if isinstance(_item17, dict):
+            _records17.append(_item17)
+        else:
+            _invalid17 += 1
+    except (ValueError, TypeError):
+        _invalid17 += 1
+st.caption(f'Journal source: {_stage17_source}')
+if _invalid17:
+    st.warning(f'{_invalid17} malformed journal entries were skipped.')
+if not _records17:
+    st.info('No automatic observations available yet. Check the GitHub Actions collector.')
 else:
-    import json as _json17
-    _records17 = []
-    for _line17 in _stage17_file.read_text(encoding='utf-8').splitlines():
-        try:
-            _records17.append(_json17.loads(_line17))
-        except (ValueError, TypeError):
-            pass
     _pending17 = sum(r.get('status') == 'pending' for r in _records17)
     _settled17 = [r for r in _records17 if r.get('status') == 'settled' and r.get('ft_home') is not None and r.get('ft_away') is not None]
     _a17,_b17,_c17 = st.columns(3)
@@ -671,7 +706,7 @@ else:
     _c17.metric('Pending',_pending17)
     if _records17:
         _latest17 = max(str(r.get('captured_utc','')) for r in _records17)
-        st.caption(f'Latest saved halftime snapshot: {_latest17}. The dashboard reflects the most recently deployed repository file, which may lag behind the scheduled run.')
+        st.caption(f'Latest saved halftime snapshot: {_latest17}. Use Refresh Stage 17 journal to check the latest committed predictions.')
         _snapshots17 = pd.DataFrame([{'Match':r.get('match'),'Captured UTC':r.get('captured_utc'),
             'HT score':f"{r.get('ht_home')}-{r.get('ht_away')}", 'Status':r.get('status'),
             'FT score':f"{r.get('ft_home')}-{r.get('ft_away')}" if r.get('status')=='settled' else 'Pending',
