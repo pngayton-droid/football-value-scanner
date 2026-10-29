@@ -743,6 +743,86 @@ else:
         st.info('Accuracy tables will appear after the provider confirms final scores for recorded matches.')
 st.warning('Scheduled collection is best-effort: GitHub Actions may run late or be skipped. Matches missed at halftime are deliberately not backfilled. Check workflow history and API usage; this is not a guaranteed continuous feed.')
 
+# Stage 18 — read-only bookmaker quote and prospective paper-return display.
+# All prices must originate from recorded halftime snapshots, never reconstructed later.
+st.subheader('Stage 18 · Recorded bookmaker prices and paper results')
+st.caption('Observed API quotes only. Prices can be delayed, suspended, unavailable or too small to fill; no bets are placed.')
+_stage18_rows = []
+for _r18 in _records17:
+    _settled18 = (_r18.get('status') == 'settled' and
+                  _r18.get('ft_home') is not None and _r18.get('ft_away') is not None)
+    if _settled18:
+        _fh18, _fa18 = int(_r18['ft_home']), int(_r18['ft_away'])
+        _sh18 = _fh18 - int(_r18['ht_home'])
+        _sa18 = _fa18 - int(_r18['ht_away'])
+        _outcomes18 = {
+            'Home full-time win': _fh18 > _fa18,
+            'Away full-time win': _fh18 < _fa18,
+            'Home wins 2H': _sh18 > _sa18,
+            'Away wins 2H': _sh18 < _sa18,
+        }
+    else:
+        _outcomes18 = {}
+    for _p18 in _r18.get('predictions') or []:
+        _market18 = _p18.get('market')
+        try:
+            _price18 = float(_p18['live_odds'])
+            _prob18 = float(_p18['probability'])
+        except (KeyError, ValueError, TypeError):
+            continue
+        if not (math.isfinite(_price18) and _price18 > 1 and
+                math.isfinite(_prob18) and 0 < _prob18 < 1):
+            continue
+        _book18 = str(_p18.get('live_bookmaker') or 'Unknown')
+        _actual18 = _outcomes18.get(_market18)
+        _net_win18 = (_price18 - 1) * (1 - commission if _book18 == 'Betfair Exchange' else 1)
+        _expected18 = 100 * (_prob18 * (1 + _net_win18) - 1)
+        _return18 = (_net_win18 if _actual18 else -1.) if _actual18 is not None else None
+        _stage18_rows.append({
+            'Match': _r18.get('match'), 'Captured UTC': _r18.get('captured_utc'),
+            'Odds captured UTC': _r18.get('live_odds_captured_utc'),
+            'Method': _p18.get('method'), 'Market': _market18,
+            'Bookmaker': _book18, 'Observed odds': _price18,
+            'Available back size': _p18.get('available_size'),
+            'Model probability %': round(_prob18 * 100, 2),
+            'Model fair odds': round(1 / _prob18, 3),
+            'Expected ROI % (model)': round(_expected18, 2),
+            'Result': ('Won' if _actual18 else 'Lost') if _actual18 is not None else 'Pending',
+            'Paper P/L per £1': round(_return18, 4) if _return18 is not None else None,
+        })
+if not _stage18_rows:
+    st.info('No recorded bookmaker quotes yet. Existing Stage 17 snapshots without prices remain valid; only future priced snapshots will appear here.')
+else:
+    _df18 = pd.DataFrame(_stage18_rows)
+    _priced18 = len(_df18)
+    _finished18 = _df18[_df18['Result'].isin(['Won', 'Lost'])]
+    _col18a, _col18b, _col18c = st.columns(3)
+    _col18a.metric('Priced model selections', _priced18)
+    _col18b.metric('Settled priced selections', len(_finished18))
+    _col18c.metric('Paper ROI (flat £1)',
+                   f"{_finished18['Paper P/L per £1'].mean()*100:+.1f}%" if len(_finished18) else 'Awaiting results')
+    _only_value18 = st.checkbox('Show model-positive expected ROI only', value=False, key='stage18_positive_only')
+    _shown18 = (_df18[_df18['Expected ROI % (model)'] > 0] if _only_value18 else _df18)
+    st.dataframe(_shown18.iloc[::-1], hide_index=True, use_container_width=True)
+    st.download_button('Download Stage 18 priced predictions CSV',
+                       _df18.to_csv(index=False).encode('utf-8-sig'),
+                       'stage18_priced_predictions.csv', 'text/csv', key='stage18_export')
+    if len(_finished18):
+        _group18 = _finished18.groupby(['Method', 'Market'], as_index=False).agg(
+            Selections=('Paper P/L per £1', 'size'),
+            Paper_profit_per_1_staked=('Paper P/L per £1', 'sum'),
+            Paper_ROI_pct=('Paper P/L per £1', lambda values: round(values.mean() * 100, 2)))
+        st.markdown('**Settled paper results by model and market**')
+        st.dataframe(_group18, hide_index=True, use_container_width=True)
+    st.caption('One hypothetical £1 back bet per priced model prediction, including negative-value quotes. '
+               'Betfair winning profit is adjusted using the sidebar commission setting; other bookmaker '
+               'prices assume no commission. These are not executable fills, and several models can '
+               'predict the same match and market. Overall paper ROI counts each model prediction '
+               'separately; it is not the return of a tested staking strategy.')
+st.warning('Stage 18 values depend on the worker saving genuine halftime quotes. '
+           'Expected ROI is based on uncalibrated model probabilities, not a proven edge. '
+           'No quote means no paper trade, and historic unpriced snapshots cannot be backfilled.')
+
 st.subheader('Stage 16 · Rolling historical accuracy comparison')
 st.caption('Three chronological test periods, six priority markets. Research only; live scanner unchanged.')
 with st.expander('Compare original, same-side and weighted methods across three periods'):
