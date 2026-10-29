@@ -516,6 +516,7 @@ if st.button('Test competition-name lookup (up to 8 requests)', key='competition
 
 if st.button("🔍 Run Complete Halftime Scan", key="clean_ht_scan"):
     try:
+        st.session_state["stage10_scan_token"] = datetime.now(timezone.utc).isoformat()
         # Clear any previous snapshot so old prices cannot masquerade as current.
         st.session_state['research_ht_rows'] = []
         st.session_state['research_live_quotes'] = {}
@@ -805,7 +806,7 @@ for item in st.session_state.get("research_ht_rows", []):
         estimated_roi = (100 * (prob * effective - 1)) if prob is not None else None
         lower_roi = (100 * (wilson_lower(wins, n) * effective - 1)) if n else None
         research_rows.append({
-            "Match": item["Match"], "HT score": item["HT score"],
+            "Match ID": mid, "Match": item["Match"], "HT score": item["HT score"],
             "Market": market, "Bookmaker": best["Bookmaker"],
             "Quoted odds": round(float(best["Odds"]), 3),
             "After commission": round(effective, 3),
@@ -836,6 +837,125 @@ if research_missing:
     with st.expander("Why some halftime matches are missing"):
         for reason in research_missing:
             st.write(reason)
+
+
+# STAGE 10 — SCAN-TRIGGERED OPPORTUNITY LOG AND HUMAN DECISION SHORTLIST
+# No additional API requests. Snapshot only the results of a fresh, completed scan.
+st.divider()
+st.header("📋 Stage 10 · Opportunity tracker and shortlist")
+st.caption("Automatically captures provisional priced research candidates when you run a complete scan. "
+           "No unattended monitoring, no live bet placement, no automatic price verification or settlement. "
+           "Records remain in Streamlit session memory until exported.")
+TRACK_COLUMNS = ["Opportunity ID", "Scan UTC", "Match ID", "Match", "HT score", "Market",
+                 "Bookmaker", "Quoted odds", "After commission", "Historical win %",
+                 "Comparable matches", "Estimated ROI %", "Wilson lower ROI %",
+                 "Sample sufficient", "Price status", "Mapping", "Decision", "Decision UTC", "Notes"]
+if "stage10_opportunities" not in st.session_state:
+    st.session_state["stage10_opportunities"] = []
+if "stage10_last_logged_token" not in st.session_state:
+    st.session_state["stage10_last_logged_token"] = ""
+
+def stage10_id(row, scan_token):
+    # Stable within a scan; never merge distinct scans just because prices coincide.
+    import hashlib
+    key = "|".join(str(row.get(k, "")) for k in
+                   ("Match ID", "Market", "Bookmaker", "Quoted odds"))
+    return hashlib.sha256((scan_token + "|" + key).encode("utf-8")).hexdigest()[:20]
+
+scan_token = st.session_state.get("stage10_scan_token", "")
+if scan_token and scan_token != st.session_state["stage10_last_logged_token"]:
+    # Even a zero-opportunity scan is marked complete, preventing accidental duplicates.
+    captured = 0
+    for row in research_rows:
+        if not row.get("Sample sufficient"):
+            continue
+        if pd.isna(row.get("Quoted odds")) or pd.isna(row.get("Estimated ROI %")):
+            continue
+        if float(row["Quoted odds"]) <= 1:
+            continue
+        # Keep all priced, sample-sufficient mapped markets, not only apparent winners.
+        item = {key: row.get(key, "") for key in TRACK_COLUMNS}
+        item.update({"Opportunity ID": stage10_id(row, scan_token),
+                     "Scan UTC": scan_token, "Decision": "Unreviewed",
+                     "Decision UTC": "", "Notes": "Unverified API quote; research only"})
+        st.session_state["stage10_opportunities"].append(item)
+        captured += 1
+    st.session_state["stage10_last_logged_token"] = scan_token
+    st.info(f"Stage 10 logged {captured} priced, sample-sufficient observations from this scan. "
+            "These are not verified or executable betting opportunities.")
+
+with st.expander("Import an earlier Stage 10 opportunity CSV (optional)"):
+    stage10_upload = st.file_uploader("Stage 10 CSV", type="csv", key="stage10_import_file")
+    if stage10_upload is not None and st.button("Import opportunity records", key="stage10_import_button"):
+        try:
+            incoming = pd.read_csv(stage10_upload, dtype=str, keep_default_na=False)
+            if not {"Opportunity ID", "Match", "Market", "Decision"}.issubset(incoming.columns):
+                st.error("This is not a Stage 10 opportunity CSV.")
+            else:
+                current = pd.DataFrame(st.session_state["stage10_opportunities"], columns=TRACK_COLUMNS)
+                for column in TRACK_COLUMNS:
+                    if column not in incoming:
+                        incoming[column] = ""
+                merged = pd.concat([current, incoming[TRACK_COLUMNS]], ignore_index=True)
+                merged = merged.drop_duplicates(subset=["Opportunity ID"], keep="first")
+                st.session_state["stage10_opportunities"] = merged.fillna("").to_dict("records")
+                st.success(f"Imported. {len(merged)} unique records now available in this session.")
+        except (ValueError, TypeError, UnicodeError) as error:
+            st.error(f"Could not import the CSV: {error}")
+
+opportunities = st.session_state["stage10_opportunities"]
+if opportunities:
+    tracked = pd.DataFrame(opportunities)
+    for numeric_column in ("Quoted odds", "Estimated ROI %", "Wilson lower ROI %", "Comparable matches"):
+        tracked[numeric_column] = pd.to_numeric(tracked[numeric_column], errors="coerce")
+    st.caption("The shortlist is ranked by historical estimated ROI, which may be unreliable. "
+               "Missing or delayed odds, thin liquidity and unverified market mapping can invalidate the apparent edge.")
+    st.metric("Logged observations (including passes)", len(tracked))
+    min_edge = st.number_input("Minimum displayed historical estimated ROI (%)", min_value=-100.0,
+                               max_value=1000.0, value=0.0, step=1.0, key="stage10_min_edge")
+    only_latest = st.checkbox("Show latest scan only", value=True, key="stage10_latest_only")
+    shortlist = tracked.copy()
+    if only_latest:
+        shortlist = shortlist[shortlist["Scan UTC"] == shortlist["Scan UTC"].max()]
+    shortlist = shortlist[shortlist["Estimated ROI %"] >= min_edge]
+    shortlist = shortlist.sort_values("Estimated ROI %", ascending=False)
+    st.subheader("Ranked research shortlist")
+    if shortlist.empty:
+        st.info("No logged observations meet this display threshold. Try lowering the threshold.")
+    else:
+        st.dataframe(shortlist[["Match", "HT score", "Market", "Bookmaker", "Quoted odds",
+                                "Historical win %", "Comparable matches", "Estimated ROI %",
+                                "Wilson lower ROI %", "Price status", "Decision"]],
+                     hide_index=True, use_container_width=True)
+    st.subheader("Your decision — never automatic")
+    choices = {f"{i+1}. {r['Match']} · {r['Market']} @ {r['Quoted odds']} [{r['Decision']}]": i
+               for i, r in enumerate(opportunities)}
+    with st.form("stage10_decision_form"):
+        chosen_label = st.selectbox("Choose a recorded observation", list(choices), key="stage10_chosen")
+        decision = st.selectbox("Decision", ["Watching", "Selected", "Passed", "Unreviewed"],
+                                key="stage10_decision")
+        decision_note = st.text_input("Optional note (e.g. price too short, insufficient liquidity)",
+                                      key="stage10_decision_note")
+        decision_submit = st.form_submit_button("Save my decision")
+    if decision_submit:
+        record = opportunities[choices[chosen_label]]
+        record["Decision"] = decision
+        record["Decision UTC"] = datetime.now(timezone.utc).isoformat()
+        if decision_note.strip():
+            record["Notes"] = (str(record.get("Notes") or "") + " | " + decision_note.strip()).strip(" |")
+        st.success("Decision saved in this session. Export the updated CSV to keep it.")
+    decisions = pd.DataFrame(opportunities)["Decision"].value_counts()
+    st.caption("Decision totals: " + ", ".join(f"{k}: {v}" for k, v in decisions.items()))
+    export = pd.DataFrame(opportunities, columns=TRACK_COLUMNS)
+    st.download_button("⬇️ Download Stage 10 opportunity log CSV",
+                       export.to_csv(index=False).encode("utf-8-sig"),
+                       "football_stage10_opportunities.csv", "text/csv", key="stage10_download")
+    st.caption("Stage 10 decisions are separate from the Stage 9 paper journal. "
+               "'Selected' means your research decision, not that a real bet was placed. "
+               "Re-running a scan creates a new observation snapshot; exported records can be reimported later.")
+else:
+    st.info("No priced observations logged yet. Run a complete halftime scan when fixtures are at halftime "
+            "and the API supplies xG and supported market prices. No test prices are invented.")
 
 
 # STAGE 9 — PAPER-TRADE RESEARCH JOURNAL
