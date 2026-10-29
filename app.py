@@ -779,22 +779,33 @@ def auto_get(url, params=None):
     return response.json()
 
 
+
 def auto_halftime(match):
+    """
+    Detect halftime using the match-list status
+    fields confirmed in TheStatsAPI responses.
+    """
+
     live = match.get("live") or {}
+
+    if not isinstance(live, dict):
+        live = {}
 
     values = [
         match.get("status"),
         match.get("status_short"),
+        match.get("match_status"),
+        live.get("match_status"),
         live.get("status"),
         live.get("status_short"),
         live.get("period"),
         live.get("phase")
     ]
 
-    accepted = {
+    halftime_statuses = {
         "ht",
-        "half_time",
         "halftime",
+        "half_time",
         "half-time",
         "half time",
         "half_time_break",
@@ -802,10 +813,11 @@ def auto_halftime(match):
     }
 
     return any(
-        str(value).strip().lower() in accepted
+        str(value).strip().lower() in halftime_statuses
         for value in values
         if value is not None
     )
+
 
 
 
