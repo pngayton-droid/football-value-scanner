@@ -1,0 +1,40 @@
+
+name: Stage 17 automatic halftime research
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: stage17-collector
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install numpy pandas requests
+      - name: Capture halftime and settle matches
+        env:
+          STATS_API_KEY: ${{ secrets.STATS_API_KEY }}
+        run: python stage17_worker.py
+      - name: Save prediction journal
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add data/stage17_predictions.jsonl
+          if ! git diff --cached --quiet; then
+            git commit -m 'Stage 17: save predictions'
+            git pull --rebase origin main
+            git push origin HEAD:main
+          fi
