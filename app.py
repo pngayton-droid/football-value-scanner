@@ -186,6 +186,45 @@ def first_half_xg(payload):
 
 
 
+
+def positive_odds(value):
+    try:
+        value = float(value)
+        return value if math.isfinite(value) and value > 1 else None
+    except (ValueError, TypeError):
+        return None
+
+
+def opening_favourite(payload):
+    books = (payload.get("data") or {}).get("bookmakers") or []
+    candidates = []
+    for book in books:
+        if not isinstance(book, dict):
+            continue
+        match_odds = (book.get("markets") or {}).get("match_odds") or {}
+        h = positive_odds((match_odds.get("home") or {}).get("opening"))
+        a = positive_odds((match_odds.get("away") or {}).get("opening"))
+        if h is None or a is None:
+            continue
+        side = "Home" if h < a else "Away" if a < h else "Level"
+        candidates.append((str(book.get("bookmaker", "Unknown")), side, min(h, a)))
+    if not candidates:
+        return "Unknown", None, "Unavailable", 0
+    preferred = next((c for c in candidates if c[0].lower() == "pinnacle"), candidates[0])
+    return preferred[1], preferred[2], preferred[0], len(candidates)
+
+
+def bookmaker_names(payload):
+    books = (payload.get("data") or {}).get("bookmakers") or []
+    return [str(b.get("bookmaker", "Unknown")) for b in books if isinstance(b, dict)]
+
+
+def match_name(match):
+    home = (match.get("home_team") or {}).get("name", "Home")
+    away = (match.get("away_team") or {}).get("name", "Away")
+    return f"{home} v {away}"
+
+
 # Read-only diagnostic: inspect the live-stats fields used for halftime xG.
 # Does not change the filtering, fair odds, or live scanner behaviour.
 st.subheader("🧪 Halftime xG diagnostics")
@@ -226,43 +265,6 @@ if _diag_matches:
         except (requests.RequestException, ValueError, TypeError, KeyError) as exc:
             st.error(f"Live-stats diagnostic failed: {exc}")
 
-
-def positive_odds(value):
-    try:
-        value = float(value)
-        return value if math.isfinite(value) and value > 1 else None
-    except (ValueError, TypeError):
-        return None
-
-
-def opening_favourite(payload):
-    books = (payload.get("data") or {}).get("bookmakers") or []
-    candidates = []
-    for book in books:
-        if not isinstance(book, dict):
-            continue
-        match_odds = (book.get("markets") or {}).get("match_odds") or {}
-        h = positive_odds((match_odds.get("home") or {}).get("opening"))
-        a = positive_odds((match_odds.get("away") or {}).get("opening"))
-        if h is None or a is None:
-            continue
-        side = "Home" if h < a else "Away" if a < h else "Level"
-        candidates.append((str(book.get("bookmaker", "Unknown")), side, min(h, a)))
-    if not candidates:
-        return "Unknown", None, "Unavailable", 0
-    preferred = next((c for c in candidates if c[0].lower() == "pinnacle"), candidates[0])
-    return preferred[1], preferred[2], preferred[0], len(candidates)
-
-
-def bookmaker_names(payload):
-    books = (payload.get("data") or {}).get("bookmakers") or []
-    return [str(b.get("bookmaker", "Unknown")) for b in books if isinstance(b, dict)]
-
-
-def match_name(match):
-    home = (match.get("home_team") or {}).get("name", "Home")
-    away = (match.get("away_team") or {}).get("name", "Away")
-    return f"{home} v {away}"
 
 
 if st.button("🔍 Run Complete Halftime Scan", key="clean_ht_scan"):
