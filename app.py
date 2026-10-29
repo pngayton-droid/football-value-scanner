@@ -403,6 +403,70 @@ def stage13_paired_validation(history, max_per_period=400, minimum_comparables=3
     return pd.DataFrame(output), None
 
 
+# Stage 14 — parallel research comparison only; original production estimates stay unchanged.
+STAGE14_MARKETS = ['Home full-time win', 'Away full-time win',
+                   'Home scores in 2H', 'Away scores in 2H',
+                   'Home wins 2H', 'Away wins 2H']
+
+def stage14_parallel(ht_home, ht_away, favourite_odds, home_xg, away_xg,
+                     favourite_side, xwidth, owidth):
+    if favourite_side not in ('Home', 'Away'):
+        return None
+    base = comparable_matches(ht_home, ht_away, favourite_odds, home_xg,
+                              away_xg, xwidth, owidth)
+    wider = comparable_matches(ht_home, ht_away, favourite_odds, home_xg,
+                               away_xg, min(1.50, xwidth + .10),
+                               min(2.00, owidth + .15))
+    if favourite_side == 'Home':
+        base_side = base[base.B365H < base.B365A]
+        wider_side = wider[wider.B365H < wider.B365A]
+    else:
+        base_side = base[base.B365A < base.B365H]
+        wider_side = wider[wider.B365A < wider.B365H]
+    samples = [('Original (live scanner)', base),
+               ('Original + favourite side', base_side),
+               ('Wider + favourite side', wider_side)]
+    rows = []
+    for market in STAGE14_MARKETS:
+        for method, sample in samples:
+            n = len(sample)
+            wins = int(market_outcomes(sample)[market].sum()) if n else 0
+            rate = wins / n if n else None
+            rows.append({'Market': market, 'Method': method, 'Matches': n,
+                         'Historical win %': round(100 * rate, 1) if rate is not None else None,
+                         'Descriptive fair odds': round(1 / rate, 2) if rate else None,
+                         'At least 100 matches': n >= 100})
+    return pd.DataFrame(rows)
+
+
+def stage14_show(ht_home, ht_away, favourite_odds, home_xg, away_xg,
+                 favourite_side, xwidth, owidth):
+    table = stage14_parallel(ht_home, ht_away, favourite_odds, home_xg,
+                             away_xg, favourite_side, xwidth, owidth)
+    if table is None:
+        st.info('Favourite side unavailable. No Stage 14 comparison is possible.')
+        return
+    st.write(f'Opening favourite: {favourite_side}. The original live scanner remains unchanged.')
+    st.dataframe(table, hide_index=True, use_container_width=True)
+    st.download_button('Download Stage 14 side-by-side CSV',
+                       table.to_csv(index=False).encode('utf-8-sig'),
+                       'stage14_parallel_comparison.csv', 'text/csv',
+                       key=f'stage14_export_{ht_home}_{ht_away}_{favourite_side}_{int(favourite_odds*100)}')
+    st.caption('The wider method adds 0.10 to each xG tolerance and 0.15 to the odds tolerance. '
+               'Historical rates are descriptive, not calibrated probabilities. '
+               'Side matching can reduce samples below the 100-match research threshold. '
+               'No betting decision, scanner estimate, or tracker entry is changed.')
+
+st.subheader('Stage 14 · Parallel favourite-side research')
+st.caption('Compare original and improved matching methods without changing the live scanner.')
+with st.expander('Compare matching methods for the manual halftime scenario'):
+    manual_side = st.selectbox('Which team was the pre-match favourite?',
+                               ['Unknown', 'Home', 'Away'], key='stage14_manual_side')
+    if manual_side == 'Unknown':
+        st.info('Choose Home or Away to enable the parallel comparison.')
+    else:
+        stage14_show(ht_h, ht_a, fav, xgh, xga, manual_side, xg_width, odds_width)
+
 st.subheader('Stage 13 · Six-market accuracy and stability laboratory')
 st.caption('Research only. This leaves the live scanner, Stage 10 tracker and all 18 markets unchanged.')
 with st.expander('Compare six key markets across two later historical periods'):
@@ -970,6 +1034,13 @@ if st.button("🔍 Run Complete Halftime Scan", key="clean_ht_scan"):
                     if item['Comparable matches'] < min_n:
                         st.warning('Insufficient historical sample for the selected minimum.')
                     st.dataframe(estimates, hide_index=True, use_container_width=True)
+                    with st.expander('Stage 14 · Compare original vs favourite-side matching'):
+                        stage14_show(
+                            int(item['HT score'].split('-')[0]),
+                            int(item['HT score'].split('-')[1]),
+                            item['Opening odds'], item['Home HT xG'], item['Away HT xG'],
+                            item['Opening favourite'], xg_width, odds_width)
+
                     st.download_button('Download 18-market estimates',
                                        estimates.to_csv(index=False).encode(),
                                        f'historical_{match_id}.csv', 'text/csv',
