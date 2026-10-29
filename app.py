@@ -1,4 +1,6 @@
 import math
+from datetime import datetime, timezone
+import io
 import re
 from pathlib import Path
 import pandas as pd
@@ -834,3 +836,113 @@ if research_missing:
     with st.expander("Why some halftime matches are missing"):
         for reason in research_missing:
             st.write(reason)
+
+
+# STAGE 9 — PAPER-TRADE RESEARCH JOURNAL
+# User-controlled, no automatic bets or unverified result settlement.
+st.divider()
+st.header("📝 Stage 9 · Halftime price and outcome journal")
+st.caption("Paper research only. Record the actual halftime price you observed, then settle the selection after full time. "
+           "Nothing is submitted to a bookmaker. Download your CSV regularly: Streamlit session memory is temporary.")
+JOURNAL_COLUMNS = ["Recorded UTC", "Match ID", "Match", "HT score", "Market", "Source",
+                   "Observed odds", "Commission %", "Effective odds", "Model probability %",
+                   "Comparable matches", "Estimated EV %", "Observed price time UTC", "Price verified",
+                   "Available stake GBP", "Status", "Outcome", "Net units", "Notes"]
+if "paper_journal" not in st.session_state:
+    st.session_state["paper_journal"] = []
+
+with st.expander("Import an earlier journal CSV (optional)"):
+    uploaded_journal = st.file_uploader("Choose a previous Stage 9 journal CSV", type=["csv"], key="stage9_import")
+    if uploaded_journal is not None and st.button("Import journal (merge without duplicates)", key="stage9_import_button"):
+        try:
+            incoming = pd.read_csv(uploaded_journal).fillna("")
+            if not {"Match", "Market", "Observed odds", "Status"}.issubset(incoming.columns):
+                st.error("This CSV does not contain the expected journal columns.")
+            else:
+                old = pd.DataFrame(st.session_state["paper_journal"])
+                merged = pd.concat([old, incoming], ignore_index=True)
+                for c in JOURNAL_COLUMNS:
+                    if c not in merged.columns:
+                        merged[c] = ""
+                merged = merged[JOURNAL_COLUMNS].drop_duplicates().fillna("")
+                st.session_state["paper_journal"] = merged.to_dict("records")
+                st.success(f"Journal now contains {len(merged)} records.")
+        except Exception as exc:
+            st.error(f"Couldn't import journal: {exc}")
+
+st.markdown("**Record a halftime quote**")
+# Research comparison is built above. Manual entry works when the API has no mapped quote.
+research_options = ["Manual entry"]
+if research_rows:
+    research_options += [f"{i+1}: {r['Match']} · {r['Market']}" for i, r in enumerate(research_rows)]
+selected_research = st.selectbox("Prefill from latest scan (optional)", research_options, key="stage9_prefill")
+prefill = research_rows[int(selected_research.split(":", 1)[0]) - 1] if selected_research != "Manual entry" else None
+with st.form("stage9_record_form"):
+    a, b = st.columns(2)
+    match_text = a.text_input("Fixture", value=prefill["Match"] if prefill else "")
+    ht_text = b.text_input("Halftime score", value=prefill["HT score"] if prefill else "")
+    market_text = st.selectbox("Market", list(market_outcomes(HISTORY.iloc[:1]).keys()),
+        index=list(market_outcomes(HISTORY.iloc[:1]).keys()).index(prefill["Market"]) if prefill else 0)
+    c, e = st.columns(2)
+    odds_value = c.number_input("Observed back odds (decimal)", min_value=1.01, max_value=1000.0,
+                                value=float(prefill["Quoted odds"]) if prefill else 2.0, step=0.05)
+    source_value = e.text_input("Bookmaker / exchange", value=prefill["Bookmaker"] if prefill else "")
+    c2, e2 = st.columns(2)
+    price_time = c2.text_input("Time you actually saw the quote (UTC)", placeholder="2026-10-29 15:45")
+    available_stake = e2.number_input("Available back liquidity / stake (£), if known", min_value=0.0, value=0.0, step=1.0)
+    confirmed_price = st.checkbox("I personally checked this price was available at the recorded time")
+    model_p = st.number_input("Model probability (%) — enter only if available", min_value=0.0, max_value=100.0,
+        value=float(prefill["Historical win %"]) if prefill and pd.notna(prefill["Historical win %"]) else 0.0, step=0.1)
+    comparable_n = st.number_input("Comparable historical matches", min_value=0, value=int(prefill["Comparable matches"]) if prefill else 0)
+    note = st.text_input("Notes (e.g. suspended, delayed, unverified market mapping)")
+    add_record = st.form_submit_button("Add to paper journal")
+if add_record:
+    if not match_text.strip() or not source_value.strip():
+        st.error("Please enter a fixture and price source.")
+    else:
+        effective = 1 + (odds_value - 1) * (1 - commission)
+        ev = 100 * (model_p / 100 * effective - 1) if model_p > 0 else ""
+        st.session_state["paper_journal"].append({
+            "Recorded UTC": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+            "Match ID": "", "Match": match_text.strip(), "HT score": ht_text.strip(),
+            "Market": market_text, "Source": source_value.strip(), "Observed odds": odds_value,
+            "Commission %": round(commission * 100, 2), "Effective odds": round(effective, 4),
+            "Model probability %": model_p if model_p > 0 else "", "Comparable matches": comparable_n,
+            "Estimated EV %": round(ev, 2) if ev != "" else "", "Observed price time UTC": price_time.strip(),
+            "Price verified": bool(confirmed_price), "Available stake GBP": available_stake if available_stake else "",
+            "Status": "Pending", "Outcome": "", "Net units": "", "Notes": note.strip()})
+        st.success("Paper observation added. Download the CSV to keep it safe.")
+
+journal_df = pd.DataFrame(st.session_state["paper_journal"], columns=JOURNAL_COLUMNS)
+if not journal_df.empty:
+    st.dataframe(journal_df, use_container_width=True, hide_index=True)
+    st.download_button("⬇️ Download paper journal CSV", journal_df.to_csv(index=False).encode("utf-8-sig"),
+                       "football_halftime_paper_journal.csv", "text/csv", key="stage9_download")
+    pending_indices = [i for i, r in enumerate(st.session_state["paper_journal"]) if r.get("Status") == "Pending"]
+    if pending_indices:
+        st.markdown("**Settle a paper observation after full time**")
+        with st.form("stage9_settlement_form"):
+            index = st.selectbox("Pending observation", pending_indices,
+                format_func=lambda i: f"#{i+1} · {st.session_state['paper_journal'][i]['Match']} · {st.session_state['paper_journal'][i]['Market']}")
+            outcome = st.selectbox("Verified market outcome", ["Won", "Lost", "Void"])
+            settle_note = st.text_input("Result source / settlement note")
+            settle = st.form_submit_button("Save paper settlement")
+        if settle:
+            rec = st.session_state["paper_journal"][index]
+            raw_price = float(rec["Observed odds"])
+            fee = float(rec["Commission %"]) / 100
+            rec["Status"] = "Settled"
+            rec["Outcome"] = outcome
+            rec["Net units"] = round((raw_price - 1) * (1 - fee), 4) if outcome == "Won" else (-1 if outcome == "Lost" else 0)
+            rec["Notes"] = (str(rec.get("Notes") or "") + " | " + settle_note).strip(" |")
+            st.success("Outcome recorded. Download the updated journal CSV.")
+    settled = [r for r in st.session_state["paper_journal"] if r.get("Status") == "Settled" and r.get("Outcome") in ("Won", "Lost")]
+    if settled:
+        net = sum(float(r["Net units"]) for r in settled)
+        st.metric("Paper return per 1-unit observation (not actual betting profit)", f"{net / len(settled) * 100:+.1f}%", f"{len(settled)} settled observations")
+        st.caption("This is descriptive only: self-selected observations, missing prices, stale quotes and unverified settlement can bias results. "
+                   "It is not a validated strategy ROI. One unit is assumed per recorded observation.")
+else:
+    st.info("No paper observations recorded yet. The form works even without live matches.")
+st.caption("Stage 9 stores observations in your current browser/server session only. Export after adding or settling records; "
+           "import the CSV next time. There is no background monitoring or automatic result fetching.")
