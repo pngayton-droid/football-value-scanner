@@ -649,6 +649,65 @@ def stage16_rolling_validation(history, max_tests_per_period=180, neighbours=150
     return pd.DataFrame(records), None
 
 
+# Stage 17 — read-only view of GitHub Actions' persisted prospective observations.
+st.subheader('Stage 17 · Automatic prospective prediction journal')
+st.caption('Predictions are recorded at halftime by a separate scheduled GitHub Action, then settled from the provider. No bets are placed.')
+_stage17_file = Path(__file__).parent / 'data' / 'stage17_predictions.jsonl'
+if not _stage17_file.exists() or not _stage17_file.stat().st_size:
+    st.info('No automatic observations yet. The GitHub Actions collector must be enabled and successfully run during halftime.')
+else:
+    import json as _json17
+    _records17 = []
+    for _line17 in _stage17_file.read_text(encoding='utf-8').splitlines():
+        try:
+            _records17.append(_json17.loads(_line17))
+        except (ValueError, TypeError):
+            pass
+    _pending17 = sum(r.get('status') == 'pending' for r in _records17)
+    _settled17 = [r for r in _records17 if r.get('status') == 'settled' and r.get('ft_home') is not None and r.get('ft_away') is not None]
+    _a17,_b17,_c17 = st.columns(3)
+    _a17.metric('Halftime snapshots',len(_records17))
+    _b17.metric('Settled',len(_settled17))
+    _c17.metric('Pending',_pending17)
+    if _records17:
+        _latest17 = max(str(r.get('captured_utc','')) for r in _records17)
+        st.caption(f'Latest saved halftime snapshot: {_latest17}. The dashboard reflects the most recently deployed repository file, which may lag behind the scheduled run.')
+        _snapshots17 = pd.DataFrame([{'Match':r.get('match'),'Captured UTC':r.get('captured_utc'),
+            'HT score':f"{r.get('ht_home')}-{r.get('ht_away')}", 'Status':r.get('status'),
+            'FT score':f"{r.get('ft_home')}-{r.get('ft_away')}" if r.get('status')=='settled' else 'Pending',
+            'Model predictions':len(r.get('predictions') or [])} for r in _records17])
+        st.dataframe(_snapshots17.tail(150).iloc[::-1],hide_index=True,use_container_width=True)
+        st.download_button('Download Stage 17 snapshot journal CSV',_snapshots17.to_csv(index=False).encode('utf-8-sig'),
+                           'stage17_snapshots.csv','text/csv',key='stage17_snapshots_export')
+    _scores17=[];_detail17=[]
+    for _r17 in _settled17:
+        _sh17=int(_r17['ft_home'])-int(_r17['ht_home']); _sa17=int(_r17['ft_away'])-int(_r17['ht_away'])
+        _truth17={'Home full-time win':int(_r17['ft_home']>_r17['ft_away']),
+                  'Away full-time win':int(_r17['ft_home']<_r17['ft_away']),
+                  'Home scores in 2H':int(_sh17>=1),'Away scores in 2H':int(_sa17>=1),
+                  'Home wins 2H':int(_sh17>_sa17),'Away wins 2H':int(_sh17<_sa17)}
+        for _p17 in _r17.get('predictions') or []:
+            _market17=_p17.get('market')
+            if _market17 not in _truth17:continue
+            _prob17=float(_p17['probability']);_actual17=_truth17[_market17]
+            _detail17.append({'Match':_r17['match'],'Captured UTC':_r17['captured_utc'],
+                'Method':_p17['method'],'Market':_market17,'Probability':_prob17,
+                'Actual':_actual17,'Brier loss':(_prob17-_actual17)**2,
+                'Sample':_p17.get('sample'),'ESS':_p17.get('ess')})
+    if _detail17:
+        _df17=pd.DataFrame(_detail17)
+        _summary17=_df17.groupby(['Method','Market'],as_index=False).agg(
+            Matches=('Brier loss','size'),Brier=('Brier loss','mean'),
+            Mean_probability=('Probability','mean'),Actual_frequency=('Actual','mean'))
+        st.markdown('**Prospective prediction accuracy — lower Brier is better**')
+        st.dataframe(_summary17,hide_index=True,use_container_width=True)
+        st.download_button('Download Stage 17 prediction-level CSV',_df17.to_csv(index=False).encode('utf-8-sig'),
+                           'stage17_predictions.csv','text/csv',key='stage17_predictions_export')
+        st.caption('Methods can have different match coverage. Compare on identical matches before declaring a winner. No price or profit validation is implied.')
+    else:
+        st.info('Accuracy tables will appear after the provider confirms final scores for recorded matches.')
+st.warning('Scheduled collection is best-effort: GitHub Actions may run late or be skipped. Matches missed at halftime are deliberately not backfilled. Check workflow history and API usage; this is not a guaranteed continuous feed.')
+
 st.subheader('Stage 16 · Rolling historical accuracy comparison')
 st.caption('Three chronological test periods, six priority markets. Research only; live scanner unchanged.')
 with st.expander('Compare original, same-side and weighted methods across three periods'):
