@@ -172,6 +172,41 @@ def normalise_label(value):
     return re.sub(r'[^a-z0-9]+', ' ', value).strip()
 
 
+def _usable_competition_metadata(record):
+    """Extract only explicit provider names, never infer them from an ID."""
+    if not isinstance(record, dict):
+        return '', ''
+    for key in ('competition', 'league', 'tournament'):
+        obj = record.get(key)
+        if isinstance(obj, dict):
+            name = obj.get('name') or obj.get('title') or obj.get('short_name') or ''
+            country = obj.get('country_name') or obj.get('country') or ''
+            if isinstance(country, dict):
+                country = country.get('name') or ''
+            if name:
+                return str(name), str(country)
+    name = record.get('competition_name') or record.get('league_name') or record.get('tournament_name') or ''
+    country = record.get('country_name') or record.get('country') or ''
+    if isinstance(country, dict):
+        country = country.get('name') or ''
+    return str(name), str(country)
+
+
+def enriched_competition_match(match):
+    """Use metadata from a successfully fetched match detail only if IDs match."""
+    match = dict(match)
+    ident = str(match.get('competition_id') or match.get('league_id') or '')
+    if not ident:
+        return match
+    record = st.session_state.get('verified_competition_metadata', {}).get(ident)
+    if record:
+        name, country = record['name'], record['country']
+        match['competition_name'] = name
+        match['country_name'] = country
+        match['competition_resolution_source'] = 'Match detail API response'
+    return match
+
+
 def competition_details(match):
     # Provider formats may differ. Retain raw fields in coverage diagnostics.
     raw = None
@@ -299,7 +334,47 @@ def live_matches():
         st.warning(f"Partial fixture scan: API reports {total_pages} pages, but the limit is {MAX_LIVE_PAGES}. Increase the limit to cover every match.")
     elif total_pages is None and len(data) == 100 and page == MAX_LIVE_PAGES:
         st.warning("Fixture scan may be incomplete: last page was full and the API supplied no usable total_pages value.")
-    return list(found.values())
+    return [enriched_competition_match(m) for m in found.values()]
+
+
+def resolve_competitions_from_match_details(matches, limit=8):
+    """Optional, bounded diagnostic. Match detail route may not be supported."""
+    st.session_state.setdefault('verified_competition_metadata', {})
+    known = st.session_state['verified_competition_metadata']
+    report = []
+    seen = set()
+    for match in matches:
+        _, _, ident = competition_details(match)
+        if not ident or ident in seen or ident in known:
+            continue
+        seen.add(ident)
+        if len(report) >= limit:
+            break
+        match_id = match.get('id')
+        try:
+            payload = api_get(f'/{match_id}')
+            data = payload.get('data') if isinstance(payload, dict) else None
+            if not isinstance(data, dict):
+                report.append({'Competition ID': ident, 'Result': 'No match-detail object', 'Name': ''})
+                continue
+            # Do not assign a name from a different competition.
+            detail_id = data.get('competition_id') or data.get('league_id')
+            if detail_id is not None and str(detail_id) != ident:
+                report.append({'Competition ID': ident, 'Result': 'ID mismatch', 'Name': ''})
+                continue
+            name, country = _usable_competition_metadata(data)
+            if not name and isinstance(data.get('match'), dict):
+                name, country = _usable_competition_metadata(data['match'])
+            if name and country:
+                known[ident] = {'name': name, 'country': country}
+                report.append({'Competition ID': ident, 'Result': 'Resolved from provider', 'Name': f'{name} ({country})'})
+            else:
+                report.append({'Competition ID': ident, 'Result': 'Name or country missing', 'Name': name})
+        except requests.RequestException as exc:
+            report.append({'Competition ID': ident, 'Result': f'Match detail unavailable ({getattr(getattr(exc, "response", None), "status_code", "request error")})', 'Name': ''})
+        except (ValueError, TypeError, KeyError):
+            report.append({'Competition ID': ident, 'Result': 'Unexpected response', 'Name': ''})
+    return report
 
 
 def is_halftime(match):
@@ -409,6 +484,20 @@ if _diag_matches:
             st.error(f"Live-stats diagnostic failed: {exc}")
 
 
+
+st.subheader('🗂️ Competition-name lookup — diagnostic')
+st.caption('Optional test: checks one match-detail request per unknown competition (maximum 8). If the provider does not expose league names, nothing is guessed and All leagues remains safe. This may consume trial API requests.')
+if st.button('Test competition-name lookup (up to 8 requests)', key='competition_name_lookup'):
+    try:
+        _lookup_matches = st.session_state.get('live_coverage_all_matches') or live_matches()
+        _lookup_report = resolve_competitions_from_match_details(_lookup_matches)
+        if _lookup_report:
+            st.dataframe(pd.DataFrame(_lookup_report), hide_index=True, use_container_width=True)
+        else:
+            st.info('No new competition IDs to test. Previously resolved names are retained for this session.')
+        st.caption(f"Resolved competition IDs in this session: {len(st.session_state.get('verified_competition_metadata', {}))}")
+    except (requests.RequestException, ValueError, TypeError, KeyError) as exc:
+        st.warning(f'Lookup could not complete: {exc}')
 
 if st.button("🔍 Run Complete Halftime Scan", key="clean_ht_scan"):
     try:
