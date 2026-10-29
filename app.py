@@ -296,6 +296,150 @@ with st.expander('Compare matching methods on later, unseen matches'):
                    'Missing historical odds, league effects, market correlations and data quality '
                    'remain limitations. A positive Brier improvement does not establish positive ROI.')
 
+
+# STAGE 13 — RESEARCH-ONLY, TWO-PERIOD PAIRED MATCHING VALIDATION
+# Does not alter live scanner, historical production filters, or opportunity tracker.
+def stage13_paired_validation(history, max_per_period=400, minimum_comparables=30):
+    import numpy as np
+    date_col = next((c for c in ('Date', 'date', 'match_date', 'MatchDate')
+                     if c in history.columns), None)
+    if date_col is None:
+        return None, 'No historical date column is available.'
+    dates = pd.to_datetime(history[date_col], errors='coerce', dayfirst=True)
+    dated = history.loc[dates.notna()].copy()
+    dated['_stage13_date'] = dates.loc[dates.notna()]
+    dated = dated.sort_values('_stage13_date').reset_index(drop=True)
+    if len(dated) < 1200:
+        return None, 'Not enough dated historical matches for three chronological periods.'
+
+    # Separate entire dates, preventing same-day fixtures from crossing periods.
+    first_boundary = dated['_stage13_date'].iloc[int(len(dated) * .70)]
+    second_boundary = dated['_stage13_date'].iloc[int(len(dated) * .85)]
+    if first_boundary >= second_boundary:
+        return None, 'Historical dates do not permit distinct validation and final periods.'
+    training = dated[dated['_stage13_date'] < first_boundary]
+    validation = dated[(dated['_stage13_date'] >= first_boundary) &
+                       (dated['_stage13_date'] < second_boundary)]
+    final = dated[dated['_stage13_date'] >= second_boundary]
+    if min(len(training), len(validation), len(final)) < 100:
+        return None, 'One of the chronological periods is too small.'
+
+    methods = [
+        ('Original filters', .40, .35, False),
+        ('Wider xG', .50, .35, False),
+        ('Wider favourite odds', .40, .50, False),
+        ('Both wider', .50, .50, False),
+        ('Original + favourite side', .40, .35, True),
+        ('Both wider + favourite side', .50, .50, True),
+    ]
+    focus = ['Home full-time win', 'Away full-time win',
+             'Home scores in 2H', 'Away scores in 2H',
+             'Home wins 2H', 'Away wins 2H']
+    output = []
+    for period_name, prior, future in [
+        ('Validation', training, validation),
+        ('Later confirmation', dated[dated['_stage13_date'] < second_boundary], final),
+    ]:
+        if len(future) > max_per_period:
+            positions = np.linspace(0, len(future)-1, max_per_period, dtype=int)
+            future = future.iloc[positions]
+        fields = ['HTHG', 'HTAG', 'fav', xg1, xg2]
+        tr = prior[fields].to_numpy(dtype=float)
+        te = future[fields].to_numpy(dtype=float)
+        train_side = prior.B365H.to_numpy(float) < prior.B365A.to_numpy(float)
+        test_side = future.B365H.to_numpy(float) < future.B365A.to_numpy(float)
+        train_y = {k: v.to_numpy(dtype=float) for k, v in market_outcomes(prior).items()
+                   if k in focus}
+        test_y = {k: v.to_numpy(dtype=float) for k, v in market_outcomes(future).items()
+                  if k in focus}
+        predicted = {name: {} for name, _, _, _ in methods}
+        for i, row in enumerate(te):
+            base = (tr[:, 0] == row[0]) & (tr[:, 1] == row[1])
+            for name, xwidth, owidth, require_side in methods:
+                mask = (base & (np.abs(tr[:, 2] - row[2]) <= owidth)
+                        & (np.abs(tr[:, 3] - row[3]) <= xwidth)
+                        & (np.abs(tr[:, 4] - row[4]) <= xwidth))
+                if require_side:
+                    mask &= train_side == test_side[i]
+                count = int(mask.sum())
+                if count >= minimum_comparables:
+                    predicted[name][i] = (count, {
+                        market: (float(outcome[mask].sum()) + 1) / (count + 2)
+                        for market, outcome in train_y.items()
+                    })
+        original = predicted['Original filters']
+        for market in focus:
+            for name, _, _, _ in methods:
+                candidate = predicted[name]
+                # Every comparison is paired on fixtures covered by BOTH methods.
+                shared = sorted(set(original) & set(candidate))
+                if len(shared) < 30:
+                    continue
+                actual = np.array([test_y[market][i] for i in shared])
+                base_p = np.array([original[i][1][market] for i in shared])
+                method_p = np.array([candidate[i][1][market] for i in shared])
+                base_loss = (base_p - actual) ** 2
+                method_loss = (method_p - actual) ** 2
+                delta = base_loss - method_loss
+                # Approximate paired interval, descriptive only; fixtures are correlated.
+                se = float(delta.std(ddof=1) / np.sqrt(len(shared))) if len(shared) > 1 else 0.
+                output.append({
+                    'Period': period_name, 'Market': market, 'Method': name,
+                    'Paired test matches': len(shared),
+                    'Original coverage': len(original),
+                    'Method coverage': len(candidate),
+                    'Original Brier': round(float(base_loss.mean()), 5),
+                    'Method Brier': round(float(method_loss.mean()), 5),
+                    'Improvement (+ better)': round(float(delta.mean()), 5),
+                    'Approx. 95% lower': round(float(delta.mean()) - 1.96 * se, 5),
+                    'Approx. 95% upper': round(float(delta.mean()) + 1.96 * se, 5),
+                    'Average method sample': round(float(np.mean([candidate[i][0] for i in shared])), 1),
+                    'Training matches': len(prior),
+                    'Period start': str(future['_stage13_date'].min().date()),
+                    'Period end': str(future['_stage13_date'].max().date()),
+                })
+    if not output:
+        return None, 'Too few shared predictions; no paired comparison was possible.'
+    return pd.DataFrame(output), None
+
+
+st.subheader('Stage 13 · Six-market accuracy and stability laboratory')
+st.caption('Research only. This leaves the live scanner, Stage 10 tracker and all 18 markets unchanged.')
+with st.expander('Compare six key markets across two later historical periods'):
+    st.write('The original matching filters are compared with wider filters and matching '
+             'the pre-match favourite on the same home/away side. Each comparison uses '
+             'the same fixtures for both methods, so coverage differences do not '
+             'distort the accuracy comparison.')
+    st.caption('Validation uses the earliest 70% for training and the next 15% for testing. '
+               'Later confirmation trains on the earliest 85% and tests on the final 15%. '
+               'At most 400 evenly spaced fixtures are evaluated per period to keep the app responsive.')
+    if st.button('Run Stage 13 paired validation', key='stage13_run'):
+        with st.spinner('Checking six markets across both historical periods…'):
+            stage13_table, stage13_error = stage13_paired_validation(HISTORY)
+        if stage13_error:
+            st.error(stage13_error)
+        else:
+            st.session_state['stage13_results'] = stage13_table
+    if 'stage13_results' in st.session_state:
+        stage13_table = st.session_state['stage13_results']
+        chosen_market = st.selectbox(
+            'Market to inspect',
+            ['All six markets'] + ['Home full-time win', 'Away full-time win',
+             'Home scores in 2H', 'Away scores in 2H',
+             'Home wins 2H', 'Away wins 2H'], key='stage13_market')
+        shown = (stage13_table if chosen_market == 'All six markets'
+                 else stage13_table[stage13_table['Market'] == chosen_market])
+        st.dataframe(shown, hide_index=True, use_container_width=True)
+        st.download_button('Download complete Stage 13 results CSV',
+                           stage13_table.to_csv(index=False).encode('utf-8-sig'),
+                           'stage13_paired_validation.csv', 'text/csv',
+                           key='stage13_download')
+        st.warning('Exploratory comparisons only. The later period is a confirmation check, '
+                   'not an untouched test after choosing a winning method. The approximate '
+                   'interval does not adjust for fixture dependence or multiple comparisons. '
+                   'A lower Brier score does not prove profitable betting, and no live '
+                   'matching settings are changed automatically.')
+
 st.subheader('Stage 11 · Historical sample quality laboratory')
 with st.expander('Inspect filter losses and safer sample-width experiments'):
     show_stage11_diagnostics(ht_h, ht_a, fav, xgh, xga, xg_width, odds_width)
