@@ -3228,3 +3228,155 @@ else:
                'and multiple markets within a match are correlated. '
                'This audit does not establish profitable betting or '
                'change the live scanner.')
+
+
+# Stage 20B — retrospective goal-model comparison against actual stored quotes.
+# The goal-model estimate is computed now, NOT a saved at-capture prediction.
+st.subheader('Stage 20B · Goal model versus captured halftime prices')
+st.caption('Retrospective diagnostic only. Recomputes the Stage 19B goal model for '
+           'recorded halftime inputs, using historical matches dated strictly before '
+           'each quote capture. These probabilities were NOT recorded when the quotes '
+           'were captured and must not be counted as prospective predictions.')
+if not _records17:
+    st.info('No Stage 17 snapshots yet. Future recorded quotes will appear here.')
+else:
+    _b20_pool = _goal19_pool().copy()
+    _b20_pool['_date20b'] = pd.to_datetime(
+        _b20_pool['date'] if 'date' in _b20_pool else _b20_pool['Date'],
+        errors='coerce', dayfirst=True, utc=True)
+    _b20_pool = _b20_pool.dropna(subset=['_date20b'])
+    _b20_rows = []
+    _b20_skips = []
+    for _r20b in _records17:
+        _preds20b = _r20b.get('predictions') or []
+        _priced20b = []
+        for _p20b in _preds20b:
+            try:
+                _od20b = float(_p20b.get('live_odds'))
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(_od20b) and _od20b > 1:
+                _priced20b.append((_p20b, _od20b))
+        if not _priced20b:
+            continue
+        _match20b = str(_r20b.get('match', 'Unknown match'))
+        try:
+            _cut20b = pd.to_datetime(_r20b['captured_utc'], utc=True)
+            _hh20b = int(_r20b['ht_home'])
+            _ha20b = int(_r20b['ht_away'])
+            _fav20b = float(_r20b['favourite_odds'])
+            _hx20b = float(_r20b['xg_home'])
+            _ax20b = float(_r20b['xg_away'])
+            if not all(math.isfinite(v) for v in (_fav20b, _hx20b, _ax20b)):
+                raise ValueError('Non-finite inputs')
+        except (ValueError, TypeError, KeyError, OverflowError):
+            _b20_skips.append({'Match': _match20b, 'Reason': 'Missing or invalid recorded halftime inputs'})
+            continue
+        # Exclude same-day matches, to avoid accidentally training on results
+        # that were not yet known at halftime.
+        _train20b = _b20_pool[_b20_pool['_date20b'] < _cut20b.normalize()]
+        _fit20b = _goal19_estimate(_train20b, _hh20b, _ha20b,
+                                   _fav20b, _hx20b, _ax20b)
+        if _fit20b is None:
+            _b20_skips.append({'Match': _match20b, 'Reason': 'Insufficient earlier training data'})
+            continue
+        _pmap20b = _goal19_probs(_fit20b[0], _fit20b[1], _hh20b, _ha20b)
+        for _pr20b, _od20b in _priced20b:
+            _market20b = _pr20b.get('market')
+            if _market20b not in _pmap20b:
+                _b20_skips.append({'Match': _match20b, 'Reason': 'Unsupported market: ' + str(_market20b)})
+                continue
+            _book20b = str(_pr20b.get('live_bookmaker') or 'Unknown')
+            _gp20b = _pmap20b[_market20b]
+            _net20b = (_od20b - 1) * (1 - commission if _book20b == 'Betfair Exchange' else 1)
+            _oldp20b = _pr20b.get('probability')
+            try:
+                _oldp20b = float(_oldp20b)
+            except (ValueError, TypeError):
+                _oldp20b = float('nan')
+            _settled20b = (_r20b.get('status') == 'settled' and
+                           _r20b.get('ft_home') is not None and
+                           _r20b.get('ft_away') is not None)
+            _result20b = 'Pending'
+            _pl20b = None
+            if _settled20b:
+                _fh20b, _fa20b = int(_r20b['ft_home']), int(_r20b['ft_away'])
+                _dh20b, _da20b = _fh20b - _hh20b, _fa20b - _ha20b
+                _truth20b = {
+                    'Home full-time win': _fh20b > _fa20b,
+                    'Draw full-time': _fh20b == _fa20b,
+                    'Away full-time win': _fh20b < _fa20b,
+                    'Home scores in 2H': _dh20b >= 1,
+                    'Away scores in 2H': _da20b >= 1,
+                    'Home wins 2H': _dh20b > _da20b,
+                    'Draw 2H': _dh20b == _da20b,
+                    'Away wins 2H': _dh20b < _da20b,
+                    'Over 0.5 goals 2H': _dh20b + _da20b >= 1,
+                    'Over 1.5 goals 2H': _dh20b + _da20b >= 2,
+                    'Over 2.5 goals 2H': _dh20b + _da20b >= 3,
+                }
+                if _market20b in _truth20b:
+                    _won20b = _truth20b[_market20b]
+                    _result20b = 'Won' if _won20b else 'Lost'
+                    _pl20b = _net20b if _won20b else -1.0
+            _b20_rows.append({
+                'Match': _match20b, 'Captured UTC': _r20b.get('captured_utc'),
+                'Odds captured UTC': _r20b.get('live_odds_captured_utc'),
+                'Market': _market20b, 'Bookmaker': _book20b,
+                'Observed odds': _od20b, 'Recorded method': _pr20b.get('method'),
+                'Recorded probability %': round(_oldp20b * 100, 3),
+                'Retrospective goal probability %': round(_gp20b * 100, 3),
+                'Recorded model EV %': round(100 * (_oldp20b * (1 + _net20b) - 1), 2),
+                'Retrospective goal EV %': round(100 * (_gp20b * (1 + _net20b) - 1), 2),
+                'Goal model positive EV': _gp20b * (1 + _net20b) > 1,
+                'Recorded model positive EV': _oldp20b * (1 + _net20b) > 1,
+                'Goal-model effective neighbours': round(_fit20b[2], 1),
+                'Earlier training matches': len(_train20b),
+                'Result': _result20b, 'Paper P/L per £1': _pl20b,
+                'Assessment type': 'Retrospective; not captured at halftime',
+            })
+    if not _b20_rows:
+        st.info('No eligible recorded quotes could be compared with the goal model.')
+    else:
+        _b20_df = pd.DataFrame(_b20_rows)
+        _b20_keys = ['Match', 'Captured UTC', 'Odds captured UTC', 'Market',
+                     'Bookmaker', 'Observed odds']
+        _b20_unique = (_b20_df.groupby(_b20_keys, dropna=False, as_index=False)
+                       .agg(Goal_probability_pct=('Retrospective goal probability %', 'first'),
+                            Goal_EV_pct=('Retrospective goal EV %', 'first'),
+                            Goal_positive=('Goal model positive EV', 'first'),
+                            Recorded_any_positive=('Recorded model positive EV', 'any'),
+                            Recorded_all_positive=('Recorded model positive EV', 'all'),
+                            Recorded_models=('Recorded method', 'nunique'),
+                            Result=('Result', 'first'),
+                            Paper_PL_per_1=('Paper P/L per £1', 'first')))
+        _b20_unique['Goal versus recorded any disagreement'] = (
+            _b20_unique['Goal_positive'] != _b20_unique['Recorded_any_positive'])
+        _b20_unique['Goal versus recorded all disagreement'] = (
+            _b20_unique['Goal_positive'] != _b20_unique['Recorded_all_positive'])
+        _c20b1, _c20b2, _c20b3 = st.columns(3)
+        _c20b1.metric('Unique compared quotes', len(_b20_unique))
+        _c20b2.metric('Goal-model positive EV', int(_b20_unique['Goal_positive'].sum()))
+        _c20b3.metric('Disagree with recorded all-model rule',
+                       int(_b20_unique['Goal versus recorded all disagreement'].sum()))
+        st.markdown('**One row per actual bookmaker quote**')
+        st.dataframe(_b20_unique, hide_index=True, use_container_width=True)
+        st.markdown('**Goal model compared with each recorded model**')
+        st.dataframe(_b20_df, hide_index=True, use_container_width=True)
+        st.download_button('Download Stage 20B unique quote CSV',
+            _b20_unique.to_csv(index=False).encode('utf-8-sig'),
+            file_name='stage20b_unique_quotes.csv', mime='text/csv', key='dl20b_unique')
+        st.download_button('Download Stage 20B model comparison CSV',
+            _b20_df.to_csv(index=False).encode('utf-8-sig'),
+            file_name='stage20b_model_comparison.csv', mime='text/csv', key='dl20b_models')
+    if _b20_skips:
+        st.caption(f'{len(_b20_skips)} snapshot/market exclusions; inspect the exclusions CSV.')
+        st.download_button('Download Stage 20B exclusions CSV',
+            pd.DataFrame(_b20_skips).to_csv(index=False).encode('utf-8-sig'),
+            file_name='stage20b_exclusions.csv', mime='text/csv', key='dl20b_exclusions')
+    st.warning('Stage 20B is a retrospective diagnostic, NOT an out-of-sample '
+               'prospective quote test. It does not modify the GitHub worker, '
+               'historical journal, live scanner, model selections or betting. '
+               'Recorded prices may be delayed or non-executable. Two matches '
+               'cannot establish a profitable strategy. For a genuine forward '
+               'test, the worker must save the goal-model probability at halftime.')
