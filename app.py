@@ -823,6 +823,46 @@ st.warning('Stage 18 values depend on the worker saving genuine halftime quotes.
            'Expected ROI is based on uncalibrated model probabilities, not a proven edge. '
            'No quote means no paper trade, and historic unpriced snapshots cannot be backfilled.')
 
+# Stage 19 — halftime research shortlist, deduplicated by observed market quote.
+# Keeps the Stage 18 raw audit intact; does not create new model probabilities.
+st.subheader('Stage 19 · Unique halftime value shortlist (research)')
+st.caption('One candidate per match, market and observed bookmaker quote. Models agreeing on the same quote are counted once. This is NOT the dual-model probability engine yet.')
+if not _stage18_rows:
+    st.info('Waiting for recorded halftime bookmaker quotes from Stage 18.')
+else:
+    _v19 = _df18[_df18['Expected ROI % (model)'] > 0].copy()
+    if _v19.empty:
+        st.info('No model-positive priced predictions recorded yet.')
+    else:
+        # Treat bookmaker quotes at different timestamps as separate observations,
+        # but never multiply the same quote by the number of modelling methods.
+        _keys19 = ['Match', 'Captured UTC', 'Odds captured UTC', 'Market', 'Bookmaker', 'Observed odds']
+        _group19 = _v19.groupby(_keys19, dropna=False, sort=False)
+        _unique19 = _group19.agg(
+            Models_agreeing=('Method', 'nunique'),
+            Methods=('Method', lambda s: ', '.join(sorted(set(map(str, s))))),
+            Lowest_model_EV_pct=('Expected ROI % (model)', 'min'),
+            Highest_model_EV_pct=('Expected ROI % (model)', 'max'),
+            Lowest_probability_pct=('Model probability %', 'min'),
+            Highest_probability_pct=('Model probability %', 'max'),
+            Result=('Result', 'first'),
+            Paper_PL_per_1=('Paper P/L per £1', 'first'),
+        ).reset_index()
+        _unique19['Extreme price review'] = _unique19['Observed odds'] >= 10
+        _settled19 = _unique19[_unique19['Result'].isin(['Won', 'Lost'])]
+        _a19, _b19, _c19 = st.columns(3)
+        _a19.metric('Unique positive-value quotes', len(_unique19))
+        _b19.metric('Distinct matches', _unique19['Match'].nunique())
+        _c19.metric('Unique quote paper ROI',
+                    f"{_settled19['Paper_PL_per_1'].mean()*100:+.1f}%" if len(_settled19) else 'Awaiting results')
+        _review19 = st.checkbox('Show only extreme-price quotes (10.00+)', value=False, key='stage19_extreme')
+        _display19 = _unique19[_unique19['Extreme price review']] if _review19 else _unique19
+        st.dataframe(_display19.iloc[::-1], hide_index=True, use_container_width=True)
+        st.download_button('Download Stage 19 unique quote research CSV',
+                           _unique19.to_csv(index=False).encode('utf-8-sig'),
+                           'stage19_unique_value_quotes.csv', 'text/csv', key='stage19_export')
+        st.caption('Research-only: ROI assumes one hypothetical £1 selection per distinct quote, not one per model. Different markets in the same match remain separate. Agreement does not validate probabilities, and 10.00+ is a review flag, not a rejection rule.')
+
 st.subheader('Stage 16 · Rolling historical accuracy comparison')
 st.caption('Three chronological test periods, six priority markets. Research only; live scanner unchanged.')
 with st.expander('Compare original, same-side and weighted methods across three periods'):
