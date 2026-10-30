@@ -3024,3 +3024,115 @@ with st.expander('Run Stage 19L hybrid policy test',expanded=False):
                    'been promoted to live predictions. Neither model has been '
                    'verified against executable historical halftime bookmaker '
                    'prices; Brier improvements do not prove betting profit.')
+
+
+# Stage 20 — prospective quote-backed, deduplicated paper-value audit.
+st.subheader('Stage 20 · Real-quote paper-value validation')
+st.caption('Audits only prices already captured at halftime by Stage 18. '
+           'One quote per match/market/bookmaker/time/price, not one per model. '
+           'No orders are placed; live model forecasts are unchanged.')
+if not _stage18_rows:
+    st.info('No captured halftime bookmaker prices yet. Wait for future '
+            'Stage 18 snapshots; never reconstruct historic prices.')
+else:
+    audit20=pd.DataFrame(_stage18_rows).copy()
+    keys20=['Match','Captured UTC','Odds captured UTC','Market',
+            'Bookmaker','Observed odds']
+    # Do not mix settled and pending records for the same quote.
+    audit20['Model probability %']=pd.to_numeric(
+        audit20['Model probability %'],errors='coerce')
+    audit20['Expected ROI % (model)']=pd.to_numeric(
+        audit20['Expected ROI % (model)'],errors='coerce')
+    audit20['Paper P/L per £1']=pd.to_numeric(
+        audit20['Paper P/L per £1'],errors='coerce')
+    audit20['Observed odds']=pd.to_numeric(
+        audit20['Observed odds'],errors='coerce')
+    audit20=audit20.dropna(subset=['Observed odds','Model probability %'])
+    quotes20=(audit20.groupby(keys20,dropna=False,sort=False)
+              .agg(Models=('Method',lambda x:', '.join(sorted(set(map(str,x))))),
+                   Model_count=('Method','nunique'),
+                   Min_model_probability_pct=('Model probability %','min'),
+                   Max_model_probability_pct=('Model probability %','max'),
+                   Min_model_EV_pct=('Expected ROI % (model)','min'),
+                   Max_model_EV_pct=('Expected ROI % (model)','max'),
+                   Result=('Result','first'),
+                   Paper_PL_per_1=('Paper P/L per £1','first'),
+                   Available_back_size=('Available back size','first'))
+              .reset_index())
+    quotes20['Positive by any model']=quotes20['Max_model_EV_pct']>0
+    quotes20['Positive by all models']=quotes20['Min_model_EV_pct']>0
+    quotes20['Longshot (odds 10+)']=quotes20['Observed odds']>=10
+    quotes20['Timestamp recorded']=quotes20['Odds captured UTC'].notna() & (
+        quotes20['Odds captured UTC'].astype(str).str.strip().ne(''))
+    quotes20['Settled']=quotes20['Result'].isin(['Won','Lost'])
+    quotes20['Candidate rule']=quotes20['Positive by all models']
+    quote20_count=len(quotes20)
+    settled20=quotes20[quotes20['Settled']]
+    eligible20=quotes20[quotes20['Candidate rule']]
+    eligible_settled20=eligible20[eligible20['Settled']]
+    c20a,c20b,c20c,c20d=st.columns(4)
+    c20a.metric('Unique recorded quotes',quote20_count)
+    c20b.metric('Distinct matches',quotes20['Match'].nunique())
+    c20c.metric('All-model-positive quotes',len(eligible20))
+    c20d.metric('Settled candidates',len(eligible_settled20))
+    st.caption('The default candidate rule requires positive expected value '
+               'under EVERY recorded model for a quote. This is a conservative '
+               'research filter, not a validated or executable betting strategy.')
+    def _roi20(frame):
+        return (100*frame['Paper_PL_per_1'].mean()
+                if len(frame) else float('nan'))
+    summary20=pd.DataFrame([
+        {'Group':'All unique quotes','Quotes':len(quotes20),
+         'Settled':len(settled20),'Wins':int((settled20['Result']=='Won').sum()),
+         'Paper ROI %':_roi20(settled20)},
+        {'Group':'Positive by any model','Quotes':int(quotes20['Positive by any model'].sum()),
+         'Settled':int((settled20['Positive by any model']).sum()),
+         'Wins':int(((settled20['Positive by any model'])&
+                     (settled20['Result']=='Won')).sum()),
+         'Paper ROI %':_roi20(settled20[settled20['Positive by any model']])},
+        {'Group':'Positive by all models','Quotes':len(eligible20),
+         'Settled':len(eligible_settled20),
+         'Wins':int((eligible_settled20['Result']=='Won').sum()),
+         'Paper ROI %':_roi20(eligible_settled20)},
+        {'Group':'All-model-positive, odds <10','Quotes':int(
+            (eligible20['Observed odds']<10).sum()),
+         'Settled':int((eligible_settled20['Observed odds']<10).sum()),
+         'Wins':int(((eligible_settled20['Observed odds']<10)&
+                     (eligible_settled20['Result']=='Won')).sum()),
+         'Paper ROI %':_roi20(eligible_settled20[
+             eligible_settled20['Observed odds']<10])},
+        {'Group':'All-model-positive, odds 10+','Quotes':int(
+            (eligible20['Observed odds']>=10).sum()),
+         'Settled':int((eligible_settled20['Observed odds']>=10).sum()),
+         'Wins':int(((eligible_settled20['Observed odds']>=10)&
+                     (eligible_settled20['Result']=='Won')).sum()),
+         'Paper ROI %':_roi20(eligible_settled20[
+             eligible_settled20['Observed odds']>=10])},
+    ])
+    st.markdown('**Deduplicated paper-return summary**')
+    st.dataframe(summary20.round(2),hide_index=True,use_container_width=True)
+    st.markdown('**All recorded quote details**')
+    st.dataframe(quotes20.iloc[::-1],hide_index=True,use_container_width=True)
+    market20=(eligible_settled20.groupby('Market',as_index=False)
+              .agg(Unique_settled_quotes=('Paper_PL_per_1','size'),
+                   Paper_PL_per_1_total=('Paper_PL_per_1','sum'),
+                   Paper_ROI_pct=('Paper_PL_per_1',lambda x:100*x.mean()))
+              if len(eligible_settled20)
+              else pd.DataFrame(columns=['Market','Unique_settled_quotes',
+                                         'Paper_PL_per_1_total','Paper_ROI_pct']))
+    st.markdown('**All-model-positive settled results by market**')
+    st.dataframe(market20.round(2),hide_index=True,use_container_width=True)
+    for label,key,data20,name in [
+        ('unique quotes','quotes',quotes20,'stage20_unique_quotes.csv'),
+        ('summary','summary',summary20,'stage20_summary.csv'),
+        ('market results','markets',market20,'stage20_market_results.csv')]:
+        st.download_button('Download Stage 20 '+label+' CSV',
+            data20.to_csv(index=False).encode('utf-8-sig'),
+            file_name=name,mime='text/csv',key='stage20_download_'+key)
+    st.warning('Important: a recorded quote is not proof of an executable '
+               'price or available stake. Quotes can be delayed. The dataset '
+               'is small and may contain repeated observations of the same '
+               'fixture; different markets are correlated. Commission uses '
+               'the sidebar setting. Model-positive expected value is not '
+               'an independently verified edge. Future genuinely captured '
+               'quotes and settled results are required.')
