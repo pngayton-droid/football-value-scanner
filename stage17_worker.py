@@ -7,6 +7,8 @@ import sys
 from pathlib import Path
 
 import requests
+import numpy as np
+import pandas as pd
 from stage17_core import load_history, predict
 
 ROOT = Path(__file__).parent
@@ -201,6 +203,63 @@ def add_prices(preds, quotes):
         prediction['gross_expected_roi_pct'] = round(100 * (p * quote['odds'] - 1), 2)
 
 
+
+def prospective_goal_predictions(history, captured_utc, ht_h, ht_a, odds, xgh, xga):
+    """Stage 20C: point-in-time goal model. No future/same-day results allowed."""
+    date_col = 'date' if 'date' in history.columns else 'Date' if 'Date' in history.columns else None
+    if date_col is None:
+        print('Stage 20C withheld: no history date column')
+        return []
+    pool = history.copy()
+    pool['_goal_date'] = pd.to_datetime(pool[date_col], errors='coerce', dayfirst=True, utc=True)
+    cutoff = pd.Timestamp(captured_utc).normalize()
+    pool = pool[pool['_goal_date'].notna() & (pool['_goal_date'] < cutoff)].copy()
+    pool['g2h'] = pool['FTHG'] - pool['HTHG']
+    pool['g2a'] = pool['FTAG'] - pool['HTAG']
+    pool = pool[pool['g2h'].between(0, 12) & pool['g2a'].between(0, 12)
+                & pool['fav'].between(1.01, 20)]
+    if len(pool) < 100:
+        return []
+    weights = np.exp(-0.5 * (
+        ((pool['HTHG'].to_numpy(float) - ht_h) / 1.20)**2 +
+        ((pool['HTAG'].to_numpy(float) - ht_a) / 1.20)**2 +
+        ((pool['fav'].to_numpy(float) - odds) / 0.85)**2 +
+        ((pool['ht_xg_home_final'].to_numpy(float) - xgh) / 0.75)**2 +
+        ((pool['ht_xg_away_final'].to_numpy(float) - xga) / 0.75)**2))
+    sw = float(weights.sum())
+    if sw < 1e-6:
+        return []
+    ess = sw * sw / max(float(np.square(weights).sum()), 1e-12)
+    prior = 60.
+    lh = max(0.05, (float(weights @ pool['g2h'].to_numpy(float)) +
+                    prior * float(pool['g2h'].mean())) / (sw + prior))
+    la = max(0.05, (float(weights @ pool['g2a'].to_numpy(float)) +
+                    prior * float(pool['g2a'].mean())) / (sw + prior))
+    def pois(lam):
+        a = np.empty(13, dtype=float)
+        a[0] = math.exp(-lam)
+        for i in range(1, 13):
+            a[i] = a[i-1] * lam / i
+        a[-1] += max(0., 1. - float(a.sum()))
+        return a
+    joint = np.outer(pois(lh), pois(la))
+    h, a = np.indices(joint.shape)
+    final = ht_h + h - ht_a - a
+    probabilities = {
+        'Home full-time win': float(joint[final > 0].sum()),
+        'Away full-time win': float(joint[final < 0].sum()),
+        'Home scores in 2H': float(joint[h >= 1].sum()),
+        'Away scores in 2H': float(joint[a >= 1].sum()),
+        'Home wins 2H': float(joint[h > a].sum()),
+        'Away wins 2H': float(joint[h < a].sum()),
+    }
+    return [{'method': 'Goal model (prospective)', 'market': market,
+             'probability': round(prob, 8), 'sample': len(pool),
+             'ess': round(ess, 3), 'model_version': '20C-v1',
+             'training_cutoff_exclusive_utc': cutoff.isoformat()}
+            for market, prob in probabilities.items()]
+
+
 def run():
     history = load_history(ROOT / 'football_merged_32653.csv')
     rows = read_rows()
@@ -222,10 +281,14 @@ def run():
             continue
         if xg is None or op is None:
             continue
+        captured = now()
         preds = predict(history, *ht, op[2], *xg, op[1])
+        try:
+            preds += prospective_goal_predictions(history, captured, *ht, op[2], *xg)
+        except (ValueError, TypeError, KeyError, OverflowError) as exc:
+            print("Stage 20C model withheld", mid, str(exc)[:150])
         if not preds:
             continue
-        captured = now()
         record = {
             'match_id': mid,
             'match': str((m.get('home_team') or {}).get('name', 'Home')) + ' v ' +
