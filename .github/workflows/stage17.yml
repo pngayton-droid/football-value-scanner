@@ -27,14 +27,15 @@ jobs:
       - name: Capture halftime and settle matches
         env:
           STATS_API_KEY: ${{ secrets.STATS_API_KEY }}
-        run: python stage17_worker.py
+        run: python stage23_dual_model.py
       - name: Save prediction journal
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add data/stage17_predictions.jsonl
           if ! git diff --cached --quiet; then
-            git commit -m 'Stage 17: save predictions'
+            git commit -m 'Stage 23: save dual-model predictions'
             git pull --rebase origin main
             git push origin HEAD:main
           fi
+
