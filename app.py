@@ -2885,3 +2885,142 @@ with st.expander('Run Stage 19K excluded-fixture test',expanded=False):
                    'calibration, sample sizes and each period; a lower score '
                    'does not prove profitable betting. Historical bookmaker '
                    'halftime prices are not available for this test.')
+
+
+# Stage 19L — prospective-style, forward-only hybrid policy comparison.
+@st.cache_data(show_spinner='Evaluating goal-only versus historical fallback policy…')
+def _stage19l_test(max_per_period=500):
+    pool=_goal19_pool().copy()
+    pool['_rolling_date']=pd.to_datetime(
+        pool['date'] if 'date' in pool else pool['Date'],
+        errors='coerce',dayfirst=True)
+    pool=pool.dropna(subset=['_rolling_date']).sort_values('_rolling_date')
+    if len(pool)<1500:return None,'Insufficient historical data.'
+    dates=np.sort(pool['_rolling_date'].dt.normalize().unique())
+    if len(dates)<100:return None,'Insufficient distinct match dates.'
+    bounds=[dates[min(int(len(dates)*q),len(dates)-1)]
+            for q in [0.50,0.60,0.70,0.80,0.90,0.999999]]
+    keys=list(_goal19_probs(1.,1.,0,0).keys())
+    weights=[0.,.25,.5,.75,1.]
+    detail=[];chosen=[];coverage=[]
+    def cap(frame):
+        if len(frame)<=max_per_period:return frame
+        return frame.iloc[np.linspace(0,len(frame)-1,max_per_period,dtype=int)].copy()
+    for fold in range(4):
+        start_v,end_v,end_t=bounds[fold:fold+3]
+        train=pool[pool['_rolling_date']<start_v].copy()
+        validation=cap(pool[(pool['_rolling_date']>=start_v)&
+                            (pool['_rolling_date']<end_v)].copy())
+        test=cap(pool[(pool['_rolling_date']>=end_v)&
+                      (pool['_rolling_date']<end_t)].copy())
+        if min(len(train),len(validation),len(test))<40:continue
+        tr=train[['HTHG','HTAG','fav',xg1,xg2]].to_numpy(float)
+        train_y={k:np.asarray(v,dtype=float)
+                 for k,v in market_outcomes(train).items()}
+        def forecasts(frame):
+            outcomes={k:np.asarray(v,dtype=float)
+                      for k,v in market_outcomes(frame).items()}
+            rows=[]
+            for i,(_,r) in enumerate(frame.iterrows()):
+                try:
+                    h=int(r['HTHG']);a=int(r['HTAG'])
+                    fo=float(r['fav']);hx=float(r[xg1]);ax=float(r[xg2])
+                    fit=_goal19_estimate(train,h,a,fo,hx,ax)
+                    if fit is None:continue
+                    mask=((tr[:,0]==h)&(tr[:,1]==a)&
+                          (np.abs(tr[:,2]-fo)<=0.35)&
+                          (np.abs(tr[:,3]-hx)<=0.40)&
+                          (np.abs(tr[:,4]-ax)<=0.40))
+                    n=int(mask.sum())
+                    goal=_goal19_probs(fit[0],fit[1],h,a)
+                    for market in keys:
+                        outcome=float(outcomes[market][i])
+                        if not np.isfinite(outcome):continue
+                        hist=((train_y[market][mask].sum()+1.)/(n+2.)
+                              if n>=30 else np.nan)
+                        rows.append({'Market':market,'Outcome':int(outcome),
+                                     'Goal':float(goal[market]),
+                                     'Historical':float(hist),
+                                     'Coverage':('Matched' if n>=30 else 'Excluded'),
+                                     'Neighbours':n})
+                except (KeyError,ValueError,TypeError,OverflowError):
+                    continue
+            return pd.DataFrame(rows)
+        v=forecasts(validation);t=forecasts(test)
+        if v.empty or t.empty:continue
+        for market in keys:
+            vm=v[(v['Market']==market)&(v['Coverage']=='Matched')]
+            tm=t[t['Market']==market]
+            if tm.empty:continue
+            if len(vm)>=15:
+                briers=[np.mean(((1-w)*vm['Historical'].to_numpy()+
+                                  w*vm['Goal'].to_numpy()-
+                                  vm['Outcome'].to_numpy())**2)
+                        for w in weights]
+                w=weights[int(np.argmin(briers))]
+            else:
+                w=1.  # safe fallback when insufficient validation
+            chosen.append({'Fold':fold+1,'Market':market,
+                           'Validation matched':len(vm),'Goal weight':w,
+                           'Test fixtures':len(tm)})
+            for _,r in tm.iterrows():
+                goal=float(r['Goal'])
+                hybrid=(goal if r['Coverage']=='Excluded'
+                        else (1-w)*float(r['Historical'])+w*goal)
+                y=int(r['Outcome'])
+                detail.append({'Fold':fold+1,'Market':market,
+                               'Coverage':r['Coverage'],'Neighbours':int(r['Neighbours']),
+                               'Outcome':y,'Goal only':goal,'Hybrid':hybrid,
+                               'Goal squared error':(goal-y)**2,
+                               'Hybrid squared error':(hybrid-y)**2})
+        coverage.append({'Fold':fold+1,'Training':len(train),
+                         'Validation sampled':len(validation),
+                         'Test sampled':len(test)})
+    if not detail:return None,'No holdout predictions available.'
+    d=pd.DataFrame(detail)
+    scores=(d.groupby(['Market','Coverage'],as_index=False)
+            .agg(Fixtures=('Outcome','size'),
+                 **{'Goal Brier':('Goal squared error','mean'),
+                    'Hybrid Brier':('Hybrid squared error','mean')}))
+    scores['Hybrid minus goal']=scores['Hybrid Brier']-scores['Goal Brier']
+    byfold=(d.groupby(['Fold','Coverage'],as_index=False)
+            .agg(Fixtures=('Outcome','size'),
+                 **{'Goal Brier':('Goal squared error','mean'),
+                    'Hybrid Brier':('Hybrid squared error','mean')}))
+    byfold['Hybrid minus goal']=byfold['Hybrid Brier']-byfold['Goal Brier']
+    return {'scores':scores,'periods':byfold,
+            'weights':pd.DataFrame(chosen),'coverage':pd.DataFrame(coverage),
+            'predictions':d},None
+
+st.subheader('Stage 19L · Goal-only versus hybrid fallback')
+st.caption('Tests a fixed rule: use the goal model on fixtures with fewer than '
+           '30 historical neighbours; on covered fixtures, use a blend weight '
+           'selected on earlier validation fixtures. The same holdout fixtures '
+           'are scored under both policies. Live scanner remains unchanged.')
+with st.expander('Run Stage 19L hybrid policy test',expanded=False):
+    limit19l=st.selectbox('Sampled fixtures per period',
+                         [250,500,1000,2000],index=1,key='limit19l')
+    if st.button('Run Stage 19L test',key='run19l'):
+        with st.spinner('Training, validating and evaluating rolling holdouts…'):
+            result19l,error19l=_stage19l_test(limit19l)
+        if error19l:st.warning(error19l)
+        else:st.session_state['result19l']=result19l
+    if 'result19l' in st.session_state:
+        result19l=st.session_state['result19l']
+        for label,key,name in [
+            ('Accuracy by market and coverage','scores','stage19l_market_scores.csv'),
+            ('Accuracy by period','periods','stage19l_period_scores.csv'),
+            ('Validation-selected blend weights','weights','stage19l_weights.csv'),
+            ('Sample coverage','coverage','stage19l_coverage.csv'),
+            ('Individual holdout predictions','predictions','stage19l_predictions.csv')]:
+            st.markdown('**'+label+'**')
+            st.dataframe(result19l[key].round(5),hide_index=True,
+                         use_container_width=True)
+            st.download_button('Download '+label+' CSV',
+                result19l[key].to_csv(index=False).encode('utf-8-sig'),
+                file_name=name,mime='text/csv',key='dl19l_'+key)
+        st.warning('Repeatedly inspecting these historical folds can lead to '
+                   'overfitting. The hybrid rule is research-only and has not '
+                   'been promoted to live predictions. Neither model has been '
+                   'verified against executable historical halftime bookmaker '
+                   'prices; Brier improvements do not prove betting profit.')
