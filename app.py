@@ -1954,3 +1954,128 @@ else:
     st.info("No paper observations recorded yet. The form works even without live matches.")
 st.caption("Stage 9 stores observations in your current browser/server session only. Export after adding or settling records; "
            "import the CSV next time. There is no background monitoring or automatic result fetching.")
+
+
+# Stage 19B — halftime goal-distribution research model.
+# Independent calculation METHOD, not independent data: both use HISTORY.
+# Model is research-only; no changes to the automatic worker or Stage 18 journal.
+st.subheader('Stage 19B · Halftime goal-distribution model (research)')
+st.caption('A second way to estimate second-half outcomes, alongside historical matching. '
+           'This is a smoothed Poisson approximation fitted to past second-half goal counts, '
+           'NOT a validated betting signal. No bets are placed.')
+
+import numpy as np
+
+@st.cache_data(show_spinner=False)
+def _goal19_pool():
+    pool = HISTORY.copy()
+    pool['g2h'] = pool['FTHG'] - pool['HTHG']
+    pool['g2a'] = pool['FTAG'] - pool['HTAG']
+    pool = pool[(pool['g2h'].between(0, 12)) & (pool['g2a'].between(0, 12))
+                & (pool['fav'].between(1.01, 20))].copy()
+    return pool
+
+
+def _poisson19(lam, max_goals=12):
+    values = np.arange(max_goals + 1)
+    probs = np.empty(max_goals + 1, dtype=float)
+    probs[0] = math.exp(-lam)
+    for k in range(1, max_goals + 1):
+        probs[k] = probs[k-1] * lam / k
+    probs[-1] += max(0., 1. - probs.sum())  # upper-tail approximation
+    return probs
+
+
+def _goal19_estimate(train, ht_home, ht_away, favourite_odds, home_xg, away_xg):
+    # Soft neighbour weighting: do not discard nearly all matches with hard bands.
+    if len(train) < 100:
+        return None
+    weights = np.exp(-0.5 * (
+        ((train['HTHG'].to_numpy(float) - ht_home) / 1.20)**2 +
+        ((train['HTAG'].to_numpy(float) - ht_away) / 1.20)**2 +
+        ((train['fav'].to_numpy(float) - favourite_odds) / 0.85)**2 +
+        ((train[xg1].to_numpy(float) - home_xg) / 0.75)**2 +
+        ((train[xg2].to_numpy(float) - away_xg) / 0.75)**2
+    ))
+    sw = float(weights.sum())
+    if sw < 1e-6:
+        return None
+    neff = sw * sw / max(float(np.square(weights).sum()), 1e-12)
+    # Shrink to broad training population, reducing instability in sparse scenarios.
+    prior = 60.
+    hmean = (float(np.dot(weights, train['g2h'].to_numpy(float))) +
+             prior * float(train['g2h'].mean())) / (sw + prior)
+    amean = (float(np.dot(weights, train['g2a'].to_numpy(float))) +
+             prior * float(train['g2a'].mean())) / (sw + prior)
+    return max(0.05, hmean), max(0.05, amean), neff, sw
+
+
+def _goal19_probs(lh, la, halftime_home, halftime_away):
+    homep, awayp = _poisson19(lh), _poisson19(la)
+    joint = np.outer(homep, awayp)
+    h2, a2 = np.indices(joint.shape)
+    total = h2 + a2
+    final_margin = halftime_home + h2 - halftime_away - a2
+    return {
+        'Home scores in 2H': float(joint[h2 >= 1].sum()),
+        'Away scores in 2H': float(joint[a2 >= 1].sum()),
+        'Home wins 2H': float(joint[h2 > a2].sum()),
+        'Draw 2H': float(joint[h2 == a2].sum()),
+        'Away wins 2H': float(joint[h2 < a2].sum()),
+        'Over 0.5 goals 2H': float(joint[total >= 1].sum()),
+        'Over 1.5 goals 2H': float(joint[total >= 2].sum()),
+        'Over 2.5 goals 2H': float(joint[total >= 3].sum()),
+        'Home full-time win': float(joint[final_margin > 0].sum()),
+        'Draw full-time': float(joint[final_margin == 0].sum()),
+        'Away full-time win': float(joint[final_margin < 0].sum()),
+    }
+
+_gpool19 = _goal19_pool()
+if len(_gpool19) < 100:
+    st.info('Not enough historical matches with complete halftime xG and results to fit the goal model.')
+else:
+    # Keep the most recent 20% out of the training pool for honest chronological checks.
+    _dated19 = _gpool19.copy()
+    _dated19['_date19'] = pd.to_datetime(_dated19['date'] if 'date' in _dated19
+                                          else _dated19['Date'], errors='coerce', dayfirst=True)
+    _dated19 = _dated19.dropna(subset=['_date19']).sort_values('_date19')
+    if len(_dated19) < 200:
+        st.warning('Insufficient dated history for chronological separation; model withheld.')
+    else:
+        _split19 = int(len(_dated19) * 0.8)
+        _train19 = _dated19.iloc[:_split19]
+        _test19 = _dated19.iloc[_split19:]
+        _fit19 = _goal19_estimate(_train19, ht_h, ht_a, fav, xgh, xga)
+        if _fit19 is None:
+            st.info('No sufficiently comparable training data for these halftime inputs.')
+        else:
+            _lh19, _la19, _neff19, _sw19 = _fit19
+            _prob19 = _goal19_probs(_lh19, _la19, ht_h, ht_a)
+            _m1, _m2, _m3 = st.columns(3)
+            _m1.metric('Expected home 2H goals', f'{_lh19:.2f}')
+            _m2.metric('Expected away 2H goals', f'{_la19:.2f}')
+            _m3.metric('Effective neighbours', f'{_neff19:.0f}')
+            _comparison19 = comparable_matches(ht_h, ht_a, fav, xgh, xga, xg_width, odds_width)
+            _outcomes19 = market_outcomes(_comparison19)
+            _rows19 = []
+            for _market19, _p19 in _prob19.items():
+                _hist19 = (float(_outcomes19[_market19].mean())
+                           if len(_comparison19) and _market19 in _outcomes19 else None)
+                _rows19.append({
+                    'Market': _market19,
+                    'Goal-model probability %': round(100*_p19, 1),
+                    'Goal-model fair odds': round(1/_p19, 2) if _p19 > 0 else None,
+                    'Historical matching %': round(100*_hist19, 1) if _hist19 is not None else None,
+                    'Difference (percentage points)': (round(100*(_p19-_hist19), 1)
+                                                      if _hist19 is not None else None),
+                })
+            st.dataframe(pd.DataFrame(_rows19), hide_index=True, use_container_width=True)
+            st.caption(f'Goal-model training: {len(_train19):,} older matches. '
+                       f'Chronological holdout reserved: {len(_test19):,} later matches. '
+                       f'Historical matching sample: {len(_comparison19):,}. '
+                       'Both methods rely on overlapping historical data. '
+                       'Fair odds exclude bookmaker margin and commission.')
+            st.warning('This first goal model assumes independent Poisson second-half goal counts '
+                       'and uses a fixed shrinkage rule. Reserving a holdout does NOT mean that '
+                       'holdout accuracy or profitability has been verified. Do not interpret '
+                       'differences or model agreement as a proven betting edge.')
