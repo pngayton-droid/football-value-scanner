@@ -2275,3 +2275,110 @@ with st.expander('Run Stage 19D three-way chronological test',expanded=False):
             st.caption('Lower Brier is better. Weights were chosen on validation data, not the '
                        'final holdout. Results are exploratory, subject to sample noise, and '
                        'do not prove profitability. Do not pick new weights from holdout results.')
+
+
+# Stage 19E — expanding-window rolling evaluation (research only).
+st.subheader('Stage 19E · Rolling halftime model validation')
+st.caption('Four forward-only chronological tests. Each fold trains on older games, '
+           'chooses a blend weight on the following period, and scores on the next period. '
+           'This does not change live predictions, Stage 17, or Stage 18.')
+
+@st.cache_data(show_spinner='Running forward-only historical folds…')
+def _validate19e(max_per_period=100):
+    pool = _goal19_pool().copy()
+    pool['_rolling_date'] = pd.to_datetime(pool['date'] if 'date' in pool else pool['Date'],
+                                           errors='coerce', dayfirst=True)
+    pool = pool.dropna(subset=['_rolling_date']).sort_values('_rolling_date')
+    if len(pool) < 1500:
+        return None, 'Not enough dated halftime history for rolling validation.'
+    # Boundaries at distinct calendar days: no same-day match crosses a split.
+    dates = np.sort(pool['_rolling_date'].dt.normalize().unique())
+    if len(dates) < 100:
+        return None, 'Not enough distinct match dates.'
+    # Fold 1: train 0-50%, validate 50-60%, test 60-70%; slide by 10%.
+    boundaries = [dates[min(int(len(dates)*q),len(dates)-1)] for q in
+                  [0.50,0.60,0.70,0.80,0.90,0.999999]]
+    keys = list(_goal19_probs(1.,1.,0,0).keys())
+    grid = [0.,0.25,0.5,0.75,1.]
+    allrows=[]
+    summary=[]
+    def cap(frame):
+        if len(frame)<=max_per_period:return frame
+        return frame.iloc[np.linspace(0,len(frame)-1,max_per_period,dtype=int)].copy()
+    for fold in range(4):
+        start_v,end_v,end_t=boundaries[fold:fold+3]
+        train=pool[pool['_rolling_date']<start_v].copy()
+        validation=cap(pool[(pool['_rolling_date']>=start_v)&(pool['_rolling_date']<end_v)])
+        test=cap(pool[(pool['_rolling_date']>=end_v)&(pool['_rolling_date']<end_t)])
+        if min(len(train),len(validation),len(test))<40:continue
+        tr=train[['HTHG','HTAG','fav',xg1,xg2]].to_numpy(float)
+        tr_y={k:np.asarray(v,dtype=float) for k,v in market_outcomes(train).items()}
+        def predict(frame):
+            feats=frame[['HTHG','HTAG','fav',xg1,xg2]].to_numpy(float)
+            outcomes={k:np.asarray(v,dtype=float) for k,v in market_outcomes(frame).items()}
+            result={k:{'h':[],'g':[],'y':[]} for k in keys}
+            for i,(h,a,fo,hx,ax) in enumerate(feats):
+                fit=_goal19_estimate(train,int(h),int(a),fo,hx,ax)
+                if fit is None:continue
+                mask=((tr[:,0]==h)&(tr[:,1]==a)&
+                      (np.abs(tr[:,2]-fo)<=0.35)&
+                      (np.abs(tr[:,3]-hx)<=0.40)&
+                      (np.abs(tr[:,4]-ax)<=0.40))
+                n=int(mask.sum())
+                if n<30:continue
+                gp=_goal19_probs(fit[0],fit[1],int(h),int(a))
+                for k in keys:
+                    result[k]['h'].append((tr_y[k][mask].sum()+1.)/(n+2.))
+                    result[k]['g'].append(gp[k])
+                    result[k]['y'].append(outcomes[k][i])
+            return result
+        v=predict(validation);t=predict(test)
+        summary.append({'Fold':fold+1,'Training matches':len(train),
+                        'Validation sampled':len(validation),'Test sampled':len(test),
+                        'Validation from':str(pd.Timestamp(start_v).date()),
+                        'Test from':str(pd.Timestamp(end_v).date())})
+        for k in keys:
+            if len(v[k]['y'])<15 or len(t[k]['y'])<15:continue
+            vh=np.asarray(v[k]['h']);vg=np.asarray(v[k]['g']);vy=np.asarray(v[k]['y'])
+            scores=[float(np.mean(((1-w)*vh+w*vg-vy)**2)) for w in grid]
+            weight=grid[int(np.argmin(scores))]
+            th=np.asarray(t[k]['h']);tg=np.asarray(t[k]['g']);ty=np.asarray(t[k]['y'])
+            blend=(1-weight)*th+weight*tg
+            allrows.append({'Fold':fold+1,'Market':k,'Validation matches':len(vy),
+                            'Test matches':len(ty),'Goal weight %':int(weight*100),
+                            'Historical Brier':float(np.mean((th-ty)**2)),
+                            'Goal Brier':float(np.mean((tg-ty)**2)),
+                            'Blend Brier':float(np.mean((blend-ty)**2)),
+                            'Historical forecast %':float(th.mean()*100),
+                            'Goal forecast %':float(tg.mean()*100),
+                            'Blend forecast %':float(blend.mean()*100),
+                            'Actual %':float(ty.mean()*100)})
+    if not allrows:return None,'Too few comparable predictions in the rolling folds.'
+    return {'rows':pd.DataFrame(allrows),'folds':pd.DataFrame(summary)},None
+
+with st.expander('Run Stage 19E rolling accuracy test',expanded=False):
+    st.caption('Uses four expanding training windows. For each fold, the blend weight is chosen '
+               'without seeing the following test outcomes. Up to 100 validation and 100 test '
+               'fixtures per fold are sampled; only matches covered by both models are compared.')
+    if st.button('Run four rolling historical tests',key='run19e'):
+        result19e,error19e=_validate19e()
+        if error19e:st.warning(error19e)
+        else:st.session_state['stage19e_results']=result19e
+    if 'stage19e_results' in st.session_state:
+        result19e=st.session_state['stage19e_results']
+        st.markdown('**Chronological folds**')
+        st.dataframe(result19e['folds'],hide_index=True,use_container_width=True)
+        raw=result19e['rows']
+        st.markdown('**Brier scores by market and fold (lower is better)**')
+        shown=raw.copy()
+        for c in ['Historical Brier','Goal Brier','Blend Brier']:
+            shown[c]=shown[c].round(4)
+        for c in ['Historical forecast %','Goal forecast %','Blend forecast %','Actual %']:
+            shown[c]=shown[c].round(1)
+        st.dataframe(shown,hide_index=True,use_container_width=True)
+        st.download_button('Download Stage 19E rolling CSV',
+                           data=raw.to_csv(index=False).encode('utf-8-sig'),
+                           file_name='stage19e_rolling_accuracy.csv',mime='text/csv',key='download19e')
+        st.warning('Exploratory accuracy only, not proven betting value. Model tuning based on '
+                   'these folds would require another later untouched test. Scores reflect only '
+                   'fixtures covered by both models, not all live matches.')
