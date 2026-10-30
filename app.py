@@ -2173,3 +2173,105 @@ with st.expander('Run Stage 19C holdout test', expanded=False):
                        'matching. These are paired comparisons ONLY where both methods have enough '
                        'data. This test does not establish value, closing-line advantage or ROI. '
                        'A future independent time period is needed before selecting a winning method.')
+
+
+# Stage 19D — weights selected on an earlier validation period, tested on a later holdout.
+st.subheader('Stage 19D · Three-way halftime model comparison')
+st.caption('Historical vs goal-distribution vs validation-selected blend. '
+           'Only halftime inputs; no bet recommendations or assumed executable prices.')
+
+@st.cache_data(show_spinner='Validating blend weights and testing later matches…')
+def _validate19d(max_validation=350, max_holdout=350):
+    pool = _goal19_pool().copy()
+    pool['_date19d'] = pd.to_datetime(pool['date'] if 'date' in pool else pool['Date'],
+                                     errors='coerce', dayfirst=True)
+    pool = pool.dropna(subset=['_date19d']).sort_values('_date19d')
+    if len(pool) < 1200:
+        return None, 'Not enough dated history for three chronological periods.'
+    first = pool['_date19d'].iloc[int(len(pool)*0.6)]
+    second = pool['_date19d'].iloc[int(len(pool)*0.8)]
+    train = pool[pool['_date19d'] < first].copy()
+    validation = pool[(pool['_date19d'] >= first) & (pool['_date19d'] < second)].copy()
+    holdout = pool[pool['_date19d'] >= second].copy()
+    if min(len(train),len(validation),len(holdout)) < 100:
+        return None, 'Insufficient matches after separating dates.'
+    def sample(frame, cap):
+        if len(frame) <= cap: return frame
+        return frame.iloc[np.linspace(0,len(frame)-1,cap,dtype=int)].copy()
+    validation = sample(validation,max_validation)
+    holdout = sample(holdout,max_holdout)
+    keys = list(_goal19_probs(1.,1.,0,0).keys())
+    tr = train[['HTHG','HTAG','fav',xg1,xg2]].to_numpy(float)
+    tr_y = {k: np.asarray(v,dtype=float) for k,v in market_outcomes(train).items()}
+    def predict(frame):
+        feats = frame[['HTHG','HTAG','fav',xg1,xg2]].to_numpy(float)
+        outcomes = {k:np.asarray(v,dtype=float) for k,v in market_outcomes(frame).items()}
+        out={k:{'hist':[],'goal':[],'actual':[]} for k in keys}
+        for i,(h,a,fo,hx,ax) in enumerate(feats):
+            fit=_goal19_estimate(train,int(h),int(a),fo,hx,ax)
+            if fit is None: continue
+            mask=((tr[:,0]==h)&(tr[:,1]==a)&
+                  (np.abs(tr[:,2]-fo)<=0.35)&
+                  (np.abs(tr[:,3]-hx)<=0.40)&
+                  (np.abs(tr[:,4]-ax)<=0.40))
+            n=int(mask.sum())
+            if n<30: continue
+            gp=_goal19_probs(fit[0],fit[1],int(h),int(a))
+            for k in keys:
+                out[k]['hist'].append((tr_y[k][mask].sum()+1.)/(n+2.))
+                out[k]['goal'].append(gp[k])
+                out[k]['actual'].append(outcomes[k][i])
+        return out
+    val=predict(validation)
+    test=predict(holdout)
+    grid=[0.,0.25,0.5,0.75,1.]
+    rows=[]
+    for k in keys:
+        v=val[k]; t=test[k]
+        if len(v['actual'])<30 or len(t['actual'])<30: continue
+        vh=np.asarray(v['hist']);vg=np.asarray(v['goal']);vy=np.asarray(v['actual'])
+        # The validation period ALONE selects the weight; no holdout outcomes enter selection.
+        scores=[np.mean(((1-w)*vh+w*vg-vy)**2) for w in grid]
+        w=grid[int(np.argmin(scores))]
+        th=np.asarray(t['hist']);tg=np.asarray(t['goal']);ty=np.asarray(t['actual'])
+        blend=(1-w)*th+w*tg
+        rows.append({'Market':k,'Validation matches':len(vy),'Holdout matches':len(ty),
+                     'Goal weight %':round(100*w),
+                     'Historical Brier':round(float(np.mean((th-ty)**2)),4),
+                     'Goal Brier':round(float(np.mean((tg-ty)**2)),4),
+                     'Blend Brier':round(float(np.mean((blend-ty)**2)),4),
+                     'Best on holdout':min({'Historical':np.mean((th-ty)**2),
+                                           'Goal':np.mean((tg-ty)**2),
+                                           'Blend':np.mean((blend-ty)**2)},
+                                          key={'Historical':np.mean((th-ty)**2),
+                                               'Goal':np.mean((tg-ty)**2),
+                                               'Blend':np.mean((blend-ty)**2)}.get),
+                     'Actual %':round(float(np.mean(ty)*100),1)})
+    return {'rows':rows,'train':len(train),'validation':len(validation),
+            'holdout':len(holdout),'validation_start':str(first.date()),
+            'holdout_start':str(second.date())},None
+
+with st.expander('Run Stage 19D three-way chronological test',expanded=False):
+    st.caption('First 60% train, next 20% select blend weights, final 20% test. '
+               'Dates at split boundaries stay together. Both models use the SAME training data; '
+               'only matches with at least 30 exact-score historical neighbours qualify. '
+               'Goal weight 0% means historical-only; 100% means goal-only.')
+    if st.button('Run three-way halftime model test',key='run19d'):
+        result19d,error19d=_validate19d()
+        if error19d:
+            st.warning(error19d)
+        else:
+            st.write(f"Training: {result19d['train']:,} | Validation sampled: {result19d['validation']:,} "
+                     f"| Final holdout sampled: {result19d['holdout']:,} "
+                     f"| Holdout begins: {result19d['holdout_start']}")
+            df19d=pd.DataFrame(result19d['rows'])
+            if len(df19d):
+                st.dataframe(df19d,hide_index=True,use_container_width=True)
+                st.download_button('Download Stage 19D comparison CSV',
+                    data=df19d.to_csv(index=False).encode('utf-8-sig'),
+                    file_name='stage19d_three_way_holdout.csv',mime='text/csv')
+            else:
+                st.warning('Too few paired predictions in validation or holdout.')
+            st.caption('Lower Brier is better. Weights were chosen on validation data, not the '
+                       'final holdout. Results are exploratory, subject to sample noise, and '
+                       'do not prove profitability. Do not pick new weights from holdout results.')
