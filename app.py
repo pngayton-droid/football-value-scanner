@@ -2522,3 +2522,54 @@ with st.expander('Run Stage 19G full audit', expanded=False):
                        'The same fixtures contribute to related markets, so rows are '
                        'correlated. These are prediction tests, not historical odds '
                        'or evidence of betting profit. No automatic model changes.')
+
+
+# Stage 19H — larger chronological holdout coverage (research only).
+st.subheader('Stage 19H · Expanded forward-only holdout audit')
+st.caption('Increase historical test coverage while keeping each prediction trained only on older games. '
+           'No change to live forecasts, paper journal, odds, or betting decisions.')
+with st.expander('Run Stage 19H expanded historical test', expanded=False):
+    test_limit = st.selectbox('Maximum sampled fixtures per validation/test period',
+                              options=[100,250,500,1000,2000], index=2, key='stage19h_limit')
+    st.caption('The 30-match historical-neighbour requirement still applies. '
+               'Many sampled fixtures may be excluded. Large runs can be slow or '
+               'exceed Streamlit resource limits; start at 500.')
+    if st.button('Run expanded rolling test', key='run19h'):
+        with st.spinner('Evaluating forward-only holdout fixtures…'):
+            expanded, expanded_error = _validate19e(max_per_period=test_limit)
+        if expanded_error:
+            st.warning(expanded_error)
+        else:
+            st.session_state['stage19h_results'] = expanded
+            st.session_state['stage19h_limit_used'] = test_limit
+    if 'stage19h_results' in st.session_state:
+        r = st.session_state['stage19h_results']
+        prediction_rows = r['calibration'].copy()
+        fold_meta = r['folds'].copy()
+        per_market = r['rows'].copy()
+        # Count unique holdout fixtures, not 11 related outcomes per fixture.
+        # All markets use the same matched set within each fold.
+        # Robust count: each eligible market has one prediction per matched fixture.
+        coverage = (prediction_rows[prediction_rows['Model']=='Goal']
+                    .groupby(['Fold','Market']).size().reset_index(name='Matched fixtures')
+                    .groupby('Fold',as_index=False)['Matched fixtures'].max())
+        coverage = fold_meta.merge(coverage,on='Fold',how='left')
+        coverage['Matched fixtures'] = coverage['Matched fixtures'].fillna(0).astype(int)
+        coverage['Excluded test fixtures'] = coverage['Test sampled']-coverage['Matched fixtures']
+        st.markdown('**Coverage: sampled fixtures versus model-qualified fixtures**')
+        st.dataframe(coverage,hide_index=True,use_container_width=True)
+        st.download_button('Download Stage 19H coverage CSV',
+            coverage.to_csv(index=False).encode('utf-8-sig'),
+            file_name='stage19h_coverage.csv',mime='text/csv',key='dl19hcoverage')
+        st.markdown('**Chronological model accuracy by market and period**')
+        st.dataframe(per_market.round(4),hide_index=True,use_container_width=True)
+        st.download_button('Download Stage 19H model scores CSV',
+            per_market.to_csv(index=False).encode('utf-8-sig'),
+            file_name='stage19h_model_scores.csv',mime='text/csv',key='dl19hscores')
+        st.download_button('Download Stage 19H individual predictions CSV',
+            prediction_rows.to_csv(index=False).encode('utf-8-sig'),
+            file_name='stage19h_holdout_predictions.csv',mime='text/csv',key='dl19hpredictions')
+        st.warning('These are out-of-sample prediction checks, not betting returns. '
+                   'They reuse the same historical source, and related markets '
+                   'share fixtures. No bookmaker halftime odds are present. '
+                   'Large sample size does not establish a profitable edge.')
