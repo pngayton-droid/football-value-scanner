@@ -3661,3 +3661,80 @@ if 'stage20e_results' in st.session_state:
                'research setting. It does not use xG or odds. This is a stronger but still incomplete '
                'benchmark; multiple overlapping outcomes and historical finalized xG limit inference. '
                'A positive improvement does not establish a bookmaker edge.')
+
+
+# Stage 20F — locked earlier-period trailing-team correction, evaluated on later fixtures.
+st.subheader('Stage 20F · Trailing-team correction: untouched later-period test')
+st.caption('Research only. Learns a small probability adjustment exclusively from an earlier validation period, '
+           'then freezes it for a later confirmation period. No change to Stage 20C or live betting signals.')
+
+@st.cache_data(show_spinner=False)
+def _stage20f_test():
+    import numpy as np
+    detail, _, _, error = _stage20e_audit(1000)
+    if error:
+        return None, None, None, error
+    # One row per match/market. The unique-date split prevents same-day leakage.
+    detail = detail.copy()
+    dates = sorted(detail['Fixture date UTC'].unique())
+    if len(dates) < 20:
+        return None, None, None, 'Too few separate match dates for a held-out correction test.'
+    boundary = dates[len(dates)//2]
+    train = detail[detail['Fixture date UTC'] < boundary].copy()
+    test = detail[detail['Fixture date UTC'] >= boundary].copy()
+    if train['Fixture row'].nunique() < 100 or test['Fixture row'].nunique() < 100:
+        return None, None, None, 'Insufficient fixtures on either side of the date cutoff.'
+    target_markets = ['Home scores in 2H', 'Home wins 2H']
+    correction_rows = []
+    test['Adjusted probability'] = test['Goal probability'].astype(float)
+    for market in target_markets:
+        calibration = train[(train['HT position'] == 'Home trailing') & (train['Market'] == market)]
+        n = len(calibration)
+        # Shrink the earlier residual toward zero by 100 pseudo-observations;
+        # no adjustment is chosen using the final period.
+        residual = float((calibration['Actual'] - calibration['Goal probability']).sum()) if n else 0.0
+        correction = max(-0.10, min(0.10, residual / (n + 100)))
+        mask = (test['HT position'] == 'Home trailing') & (test['Market'] == market)
+        test.loc[mask, 'Adjusted probability'] = (test.loc[mask, 'Goal probability'] + correction).clip(0.001, 0.999)
+        correction_rows.append({'Market': market, 'Earlier trailing examples': n,
+                                'Earlier observed minus predicted (pp)': round(100*residual/n, 2) if n else None,
+                                'Frozen adjustment (pp)': round(100*correction, 3),
+                                'Later trailing examples': int(mask.sum())})
+    test['Original Brier'] = (test['Goal probability'] - test['Actual'])**2
+    test['Adjusted Brier'] = (test['Adjusted probability'] - test['Actual'])**2
+    test['Improvement (+ better)'] = test['Original Brier'] - test['Adjusted Brier']
+    test['HT baseline Brier'] = (test['HT baseline probability'] - test['Actual'])**2
+    test['Test subset'] = np.where(test['HT position'].eq('Home trailing'), 'Home trailing', 'Other HT positions')
+    summary = test.groupby(['Market','Test subset'],as_index=False).agg(
+        Predictions=('Actual','size'), Original_Brier=('Original Brier','mean'),
+        Adjusted_Brier=('Adjusted Brier','mean'), HT_baseline_Brier=('HT baseline Brier','mean'),
+        Improvement=('Improvement (+ better)','mean'), Actual_rate=('Actual','mean'),
+        Original_forecast=('Goal probability','mean'), Adjusted_forecast=('Adjusted probability','mean'))
+    return test, summary, pd.DataFrame(correction_rows), None
+
+if st.button('Run Stage 20F untouched-period test', key='stage20f_run'):
+    with st.spinner('Learning earlier-period correction and testing only on later matches…'):
+        _f_detail, _f_summary, _f_corrections, _f_error = _stage20f_test()
+    if _f_error:
+        st.warning(_f_error)
+    else:
+        st.session_state['stage20f_results'] = (_f_detail, _f_summary, _f_corrections)
+if 'stage20f_results' in st.session_state:
+    _f_detail, _f_summary, _f_corrections = st.session_state['stage20f_results']
+    _fa, _fb, _fc = st.columns(3)
+    _fa.metric('Later-period fixtures', _f_detail['Fixture row'].nunique())
+    _fb.metric('Original goal Brier', f"{_f_detail['Original Brier'].mean():.5f}")
+    _fc.metric('Adjusted goal Brier', f"{_f_detail['Adjusted Brier'].mean():.5f}")
+    st.markdown('**Frozen adjustments learned only on earlier fixtures**')
+    st.dataframe(_f_corrections, hide_index=True, use_container_width=True)
+    st.markdown('**Later-period market accuracy — positive improvement favours adjustment**')
+    st.dataframe(_f_summary.round(5), hide_index=True, use_container_width=True)
+    st.download_button('Download Stage 20F later-period comparison CSV',
+        _f_summary.to_csv(index=False).encode('utf-8-sig'),
+        'stage20f_later_comparison.csv', 'text/csv', key='stage20f_summary_dl')
+    st.download_button('Download Stage 20F individual later predictions CSV',
+        _f_detail.to_csv(index=False).encode('utf-8-sig'),
+        'stage20f_later_predictions.csv', 'text/csv', key='stage20f_detail_dl')
+    st.caption('The adjustment is fitted on earlier historical data but the model design was informed by previous '
+               'analyses of this dataset. The later period is a chronological check, not fully independent external validation. '
+               'A small Brier improvement is not evidence of profitable betting or executable prices.')
