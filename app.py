@@ -2573,3 +2573,89 @@ with st.expander('Run Stage 19H expanded historical test', expanded=False):
                    'They reuse the same historical source, and related markets '
                    'share fixtures. No bookmaker halftime odds are present. '
                    'Large sample size does not establish a profitable edge.')
+
+
+# Stage 19I — market-level reliability and selection coverage (research only).
+st.subheader('Stage 19I · Market reliability and selection coverage')
+st.caption('Checks every market, model and rolling period. Reports calibration by '
+           'probability range, sparse outsider bins, and historical match coverage. '
+           'Does not change the live scanner or claim an edge over bookmaker odds.')
+with st.expander('Run Stage 19I reliability audit', expanded=False):
+    limit19i = st.selectbox('Sampled fixtures per period',
+                           [250,500,1000,2000], index=1, key='limit19i')
+    st.caption('A 500-fixture run is a good starting point. The historical neighbour '
+               'filter excludes fixtures that lack 30 comparable earlier matches.')
+    if st.button('Run Stage 19I audit', key='run19i'):
+        with st.spinner('Checking historical predictions and coverage…'):
+            result19i, err19i = _validate19e(max_per_period=limit19i)
+        if err19i:
+            st.warning(err19i)
+        else:
+            st.session_state['result19i'] = result19i
+    if 'result19i' in st.session_state:
+        result19i = st.session_state['result19i']
+        p = result19i['calibration'].copy()
+        folds = result19i['folds'].copy()
+        if p.empty:
+            st.warning('No eligible predictions were generated.')
+        else:
+            p['Probability band'] = pd.cut(
+                p['Predicted probability'],
+                bins=[0,.025,.05,.10,.20,.40,.60,.80,1.000001],
+                labels=['0–2.5%','2.5–5%','5–10%','10–20%',
+                        '20–40%','40–60%','60–80%','80–100%'],
+                include_lowest=True)
+            p['Squared error'] = (p['Predicted probability']-p['Outcome'])**2
+            reliability = (p.groupby(['Market','Model','Probability band'],
+                                     observed=True)
+                           .agg(Observations=('Outcome','size'),
+                                Mean_prediction=('Predicted probability','mean'),
+                                Actual_rate=('Outcome','mean'),
+                                Brier=('Squared error','mean'))
+                           .reset_index())
+            reliability['Predicted %'] = 100*reliability['Mean_prediction']
+            reliability['Actual %'] = 100*reliability['Actual_rate']
+            reliability['Gap (pp)'] = reliability['Actual %']-reliability['Predicted %']
+            reliability['Low sample'] = reliability['Observations']<30
+            reliability = reliability.drop(columns=['Mean_prediction','Actual_rate'])
+            by_period = (p.groupby(['Fold','Market','Model'],as_index=False)
+                         .agg(Observations=('Outcome','size'),
+                              Brier=('Squared error','mean'),
+                              Mean_prediction=('Predicted probability','mean'),
+                              Actual_rate=('Outcome','mean')))
+            by_period['Predicted %'] = 100*by_period.pop('Mean_prediction')
+            by_period['Actual %'] = 100*by_period.pop('Actual_rate')
+            by_period['Gap (pp)'] = by_period['Actual %']-by_period['Predicted %']
+            matched = (p[p['Model']=='Goal']
+                       .groupby(['Fold','Market']).size().reset_index(name='Matched')
+                       .groupby('Fold',as_index=False)['Matched'].max())
+            coverage = folds.merge(matched,on='Fold',how='left')
+            coverage['Matched'] = coverage['Matched'].fillna(0).astype(int)
+            coverage['Excluded'] = coverage['Test sampled']-coverage['Matched']
+            coverage['Coverage %'] = (100*coverage['Matched']/
+                                      coverage['Test sampled'].clip(lower=1))
+            st.markdown('**Historical match coverage by test period**')
+            st.dataframe(coverage.round(2),hide_index=True,use_container_width=True)
+            st.download_button('Download Stage 19I coverage CSV',
+                               coverage.to_csv(index=False).encode('utf-8-sig'),
+                               file_name='stage19i_coverage.csv',
+                               mime='text/csv',key='dl19icov')
+            st.markdown('**Reliability by market, model and probability band**')
+            st.dataframe(reliability.round(3),hide_index=True,use_container_width=True)
+            st.download_button('Download Stage 19I reliability CSV',
+                               reliability.to_csv(index=False).encode('utf-8-sig'),
+                               file_name='stage19i_reliability.csv',
+                               mime='text/csv',key='dl19irel')
+            st.markdown('**Accuracy and calibration by rolling period**')
+            st.dataframe(by_period.round(3),hide_index=True,use_container_width=True)
+            st.download_button('Download Stage 19I rolling periods CSV',
+                               by_period.to_csv(index=False).encode('utf-8-sig'),
+                               file_name='stage19i_periods.csv',
+                               mime='text/csv',key='dl19iperiods')
+            st.warning('Low-count bins are not reliable. The historical exclusion '
+                       'report gives coverage counts, not the reasons for every '
+                       'excluded fixture. No historical halftime bookmaker prices '
+                       'are available here, so profitability and actual value '
+                       'cannot be established. These are correlated market '
+                       'predictions from the same fixtures; do not count them '
+                       'as independent bets.')
