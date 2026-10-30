@@ -3566,3 +3566,98 @@ if st.button('Run Stage 20D chronological verification', key='stage20d_run'):
                    'The worker goal model itself is reused without refitting to future results. '
                    'The historical CSV contains finalized halftime xG and historical opening odds, which may not exactly match what was available live. '
                    'These limitations prevent treating the result as verified betting profitability.')
+
+# Stage 20E — stronger chronological halftime-score baseline and stability audit.
+st.subheader('Stage 20E · Second-half reliability versus halftime-score baseline')
+st.caption('Paired comparison on the exact Stage 20D fixtures. The benchmark knows the halftime score, '
+           'learns only from earlier dates, and shrinks small score groups toward earlier overall rates. '
+           'No live predictions or automatic worker are changed.')
+
+@st.cache_data(show_spinner=False)
+def _stage20e_audit(limit):
+    detail, _, err = _stage20d_verify(limit)
+    if err:
+        return None, None, None, err
+    from stage17_core import load_history
+    hist = load_history(DATA)
+    date_col = 'date' if 'date' in hist else 'Date' if 'Date' in hist else None
+    if date_col is None:
+        return None, None, None, 'Historical dates unavailable.'
+    hist = hist.copy()
+    hist['_date20e'] = pd.to_datetime(hist[date_col], errors='coerce', dayfirst=True, utc=True)
+    hist = hist[hist['_date20e'].notna() & hist['fav'].between(1.01, 20)].copy()
+    hist['_score20e'] = hist['HTHG'].astype(int).astype(str) + '-' + hist['HTAG'].astype(int).astype(str)
+    h2 = hist['FTHG'] - hist['HTHG']; a2 = hist['FTAG'] - hist['HTAG']
+    truth = {'Home full-time win': hist['FTHG'] > hist['FTAG'],
+             'Away full-time win': hist['FTHG'] < hist['FTAG'],
+             'Home scores in 2H': h2 >= 1, 'Away scores in 2H': a2 >= 1,
+             'Home wins 2H': h2 > a2, 'Away wins 2H': a2 > h2}
+    # Calculate one benchmark per date/score/market. All earlier dates only.
+    queries = detail[['Fixture date UTC', 'HT score']].drop_duplicates()
+    results = []
+    for day, qday in queries.groupby('Fixture date UTC', sort=True):
+        cutoff = pd.Timestamp(day, tz='UTC')
+        prior = hist[hist['_date20e'] < cutoff]
+        if len(prior) < 100:
+            continue
+        for score in qday['HT score']:
+            same = prior['_score20e'].eq(score)
+            n = int(same.sum())
+            for market, outcome in truth.items():
+                y = outcome.loc[prior.index]
+                global_p = (float(y.sum()) + 1) / (len(prior) + 2)
+                # 50 prior-equivalent fixtures stabilize rare halftime scores.
+                p = (float(y[same].sum()) + 50 * global_p) / (n + 50)
+                results.append({'Fixture date UTC': day, 'HT score': score, 'Market': market,
+                                'HT baseline probability': p, 'HT baseline sample': n})
+    if not results:
+        return None, None, None, 'No earlier-date benchmark predictions could be calculated.'
+    merged = detail.merge(pd.DataFrame(results), on=['Fixture date UTC','HT score','Market'], how='inner', validate='many_to_one')
+    merged['HT baseline Brier'] = (merged['HT baseline probability'] - merged['Actual'])**2
+    merged['Goal improvement vs HT baseline'] = merged['HT baseline Brier'] - merged['Brier']
+    merged['HT position'] = merged['HT score'].map(lambda s: 'Home leading' if int(s.split('-')[0]) > int(s.split('-')[1]) else ('Home trailing' if int(s.split('-')[0]) < int(s.split('-')[1]) else 'Level'))
+    merged['Test year'] = merged['Fixture date UTC'].str[:4]
+    by_market = merged.groupby('Market', as_index=False).agg(
+        Predictions=('Actual','size'), Goal_Brier=('Brier','mean'),
+        HT_baseline_Brier=('HT baseline Brier','mean'),
+        Improvement_goal_minus_HT=('Goal improvement vs HT baseline','mean'),
+        Actual_rate=('Actual','mean'), Goal_forecast=('Goal probability','mean'),
+        HT_forecast=('HT baseline probability','mean'))
+    by_segment = merged.groupby(['Test year','HT position','Market'], as_index=False).agg(
+        Predictions=('Actual','size'), Goal_Brier=('Brier','mean'),
+        HT_baseline_Brier=('HT baseline Brier','mean'),
+        Improvement_goal_minus_HT=('Goal improvement vs HT baseline','mean'),
+        Actual_rate=('Actual','mean'), Goal_forecast=('Goal probability','mean'))
+    return merged, by_market, by_segment, None
+
+_stage20e_limit = st.select_slider('Stage 20E historical fixtures', options=[100,250,500,1000], value=500, key='stage20e_limit')
+if st.button('Run Stage 20E paired historical test', key='stage20e_run'):
+    with st.spinner('Testing the goal model against earlier-date halftime-score frequencies…'):
+        _e_detail, _e_markets, _e_segments, _e_error = _stage20e_audit(_stage20e_limit)
+    if _e_error:
+        st.warning(_e_error)
+    else:
+        st.session_state['stage20e_results'] = (_e_detail, _e_markets, _e_segments)
+if 'stage20e_results' in st.session_state:
+    _e_detail, _e_markets, _e_segments = st.session_state['stage20e_results']
+    _e1, _e2, _e3 = st.columns(3)
+    _e1.metric('Paired historical fixtures', _e_detail['Fixture row'].nunique())
+    _e2.metric('Goal model Brier', f"{_e_detail['Brier'].mean():.4f}")
+    _e3.metric('HT-aware baseline Brier', f"{_e_detail['HT baseline Brier'].mean():.4f}")
+    st.markdown('**Paired comparison by market (positive improvement favours goal model)**')
+    st.dataframe(_e_markets.round(5), hide_index=True, use_container_width=True)
+    st.markdown('**By test year, halftime position and market**')
+    st.dataframe(_e_segments.round(5), hide_index=True, use_container_width=True)
+    st.download_button('Download Stage 20E market comparison CSV',
+                       _e_markets.to_csv(index=False).encode('utf-8-sig'),
+                       'stage20e_market_comparison.csv','text/csv',key='stage20e_market_dl')
+    st.download_button('Download Stage 20E segment comparison CSV',
+                       _e_segments.to_csv(index=False).encode('utf-8-sig'),
+                       'stage20e_segment_comparison.csv','text/csv',key='stage20e_segment_dl')
+    st.download_button('Download Stage 20E paired predictions CSV',
+                       _e_detail.to_csv(index=False).encode('utf-8-sig'),
+                       'stage20e_paired_predictions.csv','text/csv',key='stage20e_detail_dl')
+    st.caption('The score-aware benchmark uses 50 prior-equivalent fixtures of shrinkage, chosen as a fixed '
+               'research setting. It does not use xG or odds. This is a stronger but still incomplete '
+               'benchmark; multiple overlapping outcomes and historical finalized xG limit inference. '
+               'A positive improvement does not establish a bookmaker edge.')
