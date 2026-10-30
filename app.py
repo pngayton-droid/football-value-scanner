@@ -2302,6 +2302,7 @@ def _validate19e(max_per_period=100):
     grid = [0.,0.25,0.5,0.75,1.]
     allrows=[]
     summary=[]
+    calibration_rows=[]
     def cap(frame):
         if len(frame)<=max_per_period:return frame
         return frame.iloc[np.linspace(0,len(frame)-1,max_per_period,dtype=int)].copy()
@@ -2344,6 +2345,12 @@ def _validate19e(max_per_period=100):
             weight=grid[int(np.argmin(scores))]
             th=np.asarray(t[k]['h']);tg=np.asarray(t[k]['g']);ty=np.asarray(t[k]['y'])
             blend=(1-weight)*th+weight*tg
+            for model_name, estimates in [('Historical',th),('Goal',tg),('Blend',blend)]:
+                for predicted, observed in zip(estimates,ty):
+                    calibration_rows.append({
+                        'Fold':fold+1,'Market':k,'Model':model_name,
+                        'Predicted probability':float(predicted),
+                        'Outcome':int(observed)})
             allrows.append({'Fold':fold+1,'Market':k,'Validation matches':len(vy),
                             'Test matches':len(ty),'Goal weight %':int(weight*100),
                             'Historical Brier':float(np.mean((th-ty)**2)),
@@ -2354,7 +2361,8 @@ def _validate19e(max_per_period=100):
                             'Blend forecast %':float(blend.mean()*100),
                             'Actual %':float(ty.mean()*100)})
     if not allrows:return None,'Too few comparable predictions in the rolling folds.'
-    return {'rows':pd.DataFrame(allrows),'folds':pd.DataFrame(summary)},None
+    return {'rows':pd.DataFrame(allrows),'folds':pd.DataFrame(summary),
+            'calibration':pd.DataFrame(calibration_rows)},None
 
 with st.expander('Run Stage 19E rolling accuracy test',expanded=False):
     st.caption('Uses four expanding training windows. For each fold, the blend weight is chosen '
@@ -2382,3 +2390,68 @@ with st.expander('Run Stage 19E rolling accuracy test',expanded=False):
         st.warning('Exploratory accuracy only, not proven betting value. Model tuning based on '
                    'these folds would require another later untouched test. Scores reflect only '
                    'fixtures covered by both models, not all live matches.')
+
+
+# Stage 19F — out-of-sample probability calibration audit.
+# Reuses forward-only Stage 19E predictions; does not alter live decisions.
+st.subheader('Stage 19F · Halftime probability calibration audit')
+st.caption('Are our 20%, 40%, or 60% predictions occurring that often? '
+           'Uses only the held-out match predictions from the four forward-only '
+           'Stage 19E folds. No bookmaker prices, betting signals or staking.')
+
+with st.expander('Run Stage 19F calibration audit', expanded=False):
+    st.caption('Run Stage 19E first if needed. Calibration is shown separately '
+               'for each model and market. Small bins are noisy; the same match '
+               'appears in multiple related markets, so counts must not be '
+               'treated as independent betting opportunities.')
+    if st.button('Run calibration audit', key='run19f'):
+        results, error = _validate19e()
+        if error:
+            st.warning(error)
+        else:
+            st.session_state['stage19f_calibration'] = results['calibration']
+    if 'stage19f_calibration' in st.session_state:
+        cal = st.session_state['stage19f_calibration']
+        if cal.empty:
+            st.warning('No matched holdout predictions available.')
+        else:
+            markets = sorted(cal['Market'].unique().tolist())
+            selected_market = st.selectbox('Market to inspect', markets, key='stage19f_market')
+            subset = cal[cal['Market'] == selected_market].copy()
+            subset['Probability band'] = pd.cut(
+                subset['Predicted probability'],
+                bins=[0,.2,.4,.6,.8,1.0000001],
+                labels=['0–20%','20–40%','40–60%','60–80%','80–100%'],
+                include_lowest=True)
+            grouped = (subset.groupby(['Model','Probability band'],observed=True)
+                       .agg(Observations=('Outcome','size'),
+                            **{'Average predicted %':('Predicted probability',lambda x:100*x.mean()),
+                               'Actual frequency %':('Outcome',lambda x:100*x.mean())})
+                       .reset_index())
+            grouped['Calibration gap (pp)'] = (
+                grouped['Actual frequency %']-grouped['Average predicted %'])
+            st.dataframe(grouped.round(2), hide_index=True, use_container_width=True)
+            scores = (subset.assign(
+                squared_error=(subset['Predicted probability']-subset['Outcome'])**2,
+                absolute_error=(subset['Predicted probability']-subset['Outcome']).abs())
+                .groupby('Model',as_index=False)
+                .agg(Observations=('Outcome','size'),
+                     **{'Brier':('squared_error','mean'),
+                        'Mean predicted %':('Predicted probability',lambda x:100*x.mean()),
+                        'Actual %':('Outcome',lambda x:100*x.mean())}))
+            st.markdown('**Holdout accuracy and average calibration by model**')
+            st.dataframe(scores.round(4), hide_index=True, use_container_width=True)
+            st.download_button(
+                'Download Stage 19F calibration CSV',
+                data=grouped.to_csv(index=False).encode('utf-8-sig'),
+                file_name='stage19f_calibration_bins.csv', mime='text/csv',
+                key='stage19f_bins_export')
+            st.download_button(
+                'Download Stage 19F individual holdout predictions CSV',
+                data=cal.to_csv(index=False).encode('utf-8-sig'),
+                file_name='stage19f_holdout_predictions.csv', mime='text/csv',
+                key='stage19f_predictions_export')
+            st.warning('Calibration is exploratory: only covered holdout matches '
+                       'are included. The 0–20% bin is too broad to validate '
+                       'extreme longshots such as 41.00 odds. No model is '
+                       'recalibrated or promoted to live betting by this test.')
