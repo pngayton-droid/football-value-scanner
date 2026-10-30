@@ -2766,3 +2766,122 @@ with st.expander('Run Stage 19J coverage diagnostics',expanded=False):
                 'rule, not proof that the goal model cannot predict excluded '
                 'fixtures. It cannot measure betting profitability without '
                 'historical executable halftime prices.')
+
+
+# Stage 19K — forward-only goal-model validation on previously excluded fixtures.
+@st.cache_data(show_spinner='Testing the goal model on matched and excluded fixtures…')
+def _stage19k_test(max_per_period=500):
+    pool=_goal19_pool().copy()
+    pool['_rolling_date']=pd.to_datetime(
+        pool['date'] if 'date' in pool else pool['Date'],
+        errors='coerce',dayfirst=True)
+    pool=pool.dropna(subset=['_rolling_date']).sort_values('_rolling_date')
+    if len(pool)<1500:return None,'Insufficient historical data.'
+    dates=np.sort(pool['_rolling_date'].dt.normalize().unique())
+    if len(dates)<100:return None,'Insufficient distinct match dates.'
+    bounds=[dates[min(int(len(dates)*q),len(dates)-1)]
+            for q in [0.50,0.60,0.70,0.80,0.90,0.999999]]
+    allrows=[];coverage=[]
+    for fold in range(4):
+        train=pool[pool['_rolling_date']<bounds[fold]].copy()
+        test=pool[(pool['_rolling_date']>=bounds[fold+1])&
+                  (pool['_rolling_date']<bounds[fold+2])].copy()
+        if len(test)>max_per_period:
+            test=test.iloc[np.linspace(0,len(test)-1,max_per_period,dtype=int)].copy()
+        tr=train[['HTHG','HTAG','fav',xg1,xg2]].to_numpy(float)
+        actuals={k:np.asarray(v,dtype=float)
+                 for k,v in market_outcomes(test).items()}
+        counts={'Matched (30+ neighbours)':0,
+                'Excluded (<30 neighbours)':0,'Goal fit unavailable':0}
+        for i,(_,r) in enumerate(test.iterrows()):
+            try:
+                h=int(r['HTHG']);a=int(r['HTAG'])
+                fo=float(r['fav']);hx=float(r[xg1]);ax=float(r[xg2])
+                n=int(((tr[:,0]==h)&(tr[:,1]==a)&
+                       (np.abs(tr[:,2]-fo)<=0.35)&
+                       (np.abs(tr[:,3]-hx)<=0.40)&
+                       (np.abs(tr[:,4]-ax)<=0.40)).sum())
+                group=('Matched (30+ neighbours)' if n>=30
+                       else 'Excluded (<30 neighbours)')
+                fit=_goal19_estimate(train,h,a,fo,hx,ax)
+                if fit is None:
+                    counts['Goal fit unavailable']+=1
+                    continue
+                counts[group]+=1
+                probs=_goal19_probs(fit[0],fit[1],h,a)
+                for market,pred in probs.items():
+                    y=actuals[market][i]
+                    if not np.isfinite(y):continue
+                    allrows.append({
+                        'Fold':fold+1,'Coverage group':group,
+                        'Market':market,'Prediction':float(pred),
+                        'Outcome':int(y),'Squared error':float((pred-y)**2),
+                        'Comparable earlier matches':n,
+                        'Effective neighbours (goal)':float(fit[2]),
+                        'Favourite opening odds':fo,
+                        'HT score':f'{h}–{a}'})
+            except (KeyError,ValueError,TypeError,OverflowError):
+                counts['Goal fit unavailable']+=1
+        for group,n in counts.items():
+            coverage.append({'Fold':fold+1,'Group':group,'Fixtures':n,
+                             'Sampled':len(test)})
+    if not allrows:return None,'No usable predictions.'
+    p=pd.DataFrame(allrows)
+    p['Probability band']=pd.cut(
+        p['Prediction'],
+        bins=[0,.025,.05,.10,.20,.40,.60,.80,1.000001],
+        labels=['0–2.5%','2.5–5%','5–10%','10–20%',
+                '20–40%','40–60%','60–80%','80–100%'],
+        include_lowest=True)
+    scores=(p.groupby(['Coverage group','Market'],as_index=False)
+            .agg(Fixtures=('Outcome','size'),
+                 Brier=('Squared error','mean'),
+                 **{'Predicted %':('Prediction',lambda v:100*v.mean()),
+                    'Actual %':('Outcome',lambda v:100*v.mean())}))
+    scores['Gap (pp)']=scores['Actual %']-scores['Predicted %']
+    by_fold=(p.groupby(['Fold','Coverage group','Market'],as_index=False)
+             .agg(Fixtures=('Outcome','size'),
+                  Brier=('Squared error','mean'),
+                  **{'Predicted %':('Prediction',lambda v:100*v.mean()),
+                     'Actual %':('Outcome',lambda v:100*v.mean())}))
+    bands=(p.groupby(['Coverage group','Market','Probability band'],
+                     observed=True,as_index=False)
+           .agg(Fixtures=('Outcome','size'),
+                **{'Predicted %':('Prediction',lambda v:100*v.mean()),
+                   'Actual %':('Outcome',lambda v:100*v.mean())}))
+    bands['Gap (pp)']=bands['Actual %']-bands['Predicted %']
+    bands['Small sample (<30)']=bands['Fixtures']<30
+    return {'coverage':pd.DataFrame(coverage),'scores':scores,
+            'periods':by_fold,'bands':bands},None
+
+st.subheader('Stage 19K · Can the goal model cover excluded matches?')
+st.caption('Forward-only holdout test of the goal model on both matched and '
+           'previously excluded fixtures, with identical time periods. '
+           'No changes to live predictions or betting selections.')
+with st.expander('Run Stage 19K excluded-fixture test',expanded=False):
+    limit19k=st.selectbox('Sampled fixtures per period',
+                         [250,500,1000,2000],index=1,key='limit19k')
+    if st.button('Run Stage 19K test',key='run19k'):
+        with st.spinner('Evaluating holdout fixtures…'):
+            result19k,error19k=_stage19k_test(limit19k)
+        if error19k:st.warning(error19k)
+        else:st.session_state['result19k']=result19k
+    if 'result19k' in st.session_state:
+        result19k=st.session_state['result19k']
+        for title,key,filename in [
+            ('Fixture coverage','coverage','stage19k_coverage.csv'),
+            ('Model accuracy by market and coverage','scores','stage19k_scores.csv'),
+            ('Accuracy by rolling period','periods','stage19k_periods.csv'),
+            ('Probability calibration bands','bands','stage19k_bands.csv')]:
+            st.markdown('**'+title+'**')
+            st.dataframe(result19k[key].round(4),hide_index=True,
+                         use_container_width=True)
+            st.download_button(
+                'Download '+title+' CSV',
+                result19k[key].to_csv(index=False).encode('utf-8-sig'),
+                file_name=filename,mime='text/csv',key='stage19k_dl_'+key)
+        st.warning('Excluded and matched fixtures have different difficulty '
+                   'and event frequencies. Compare Brier scores alongside '
+                   'calibration, sample sizes and each period; a lower score '
+                   'does not prove profitable betting. Historical bookmaker '
+                   'halftime prices are not available for this test.')
