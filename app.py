@@ -2079,3 +2079,97 @@ else:
                        'and uses a fixed shrinkage rule. Reserving a holdout does NOT mean that '
                        'holdout accuracy or profitability has been verified. Do not interpret '
                        'differences or model agreement as a proven betting edge.')
+
+
+# Stage 19C — genuine chronological holdout validation of both halftime models.
+st.subheader('Stage 19C · Dual-model historical accuracy test')
+st.caption('Compares predictions for the SAME later matches, using only earlier training matches. '
+           'This measures predictive accuracy, not betting profit or an executable strategy.')
+
+@st.cache_data(show_spinner='Testing both halftime models on unseen historical matches…')
+def _validate19c(max_tests=500):
+    pool = _goal19_pool().copy()
+    pool['_date19c'] = pd.to_datetime(pool['date'] if 'date' in pool else pool['Date'],
+                                     errors='coerce', dayfirst=True)
+    pool = pool.dropna(subset=['_date19c']).sort_values('_date19c')
+    if len(pool) < 1000:
+        return None, 'Insufficient dated matches for chronological validation.'
+    split = int(len(pool) * 0.8)
+    cutoff = pool['_date19c'].iloc[split]
+    train = pool[pool['_date19c'] < cutoff].copy()
+    test = pool[pool['_date19c'] >= cutoff].copy()
+    if len(train) < 500 or len(test) < 100:
+        return None, 'Insufficient training/test data after excluding same-date overlap.'
+    if len(test) > max_tests:
+        test = test.iloc[np.linspace(0, len(test)-1, max_tests, dtype=int)].copy()
+    features = ['HTHG','HTAG','fav',xg1,xg2]
+    tr = train[features].to_numpy(float)
+    te = test[features].to_numpy(float)
+    tr_y = {k: np.asarray(v, dtype=float) for k,v in market_outcomes(train).items()}
+    te_y = {k: np.asarray(v, dtype=float) for k,v in market_outcomes(test).items()}
+    keys = list(_goal19_probs(1.,1.,0,0).keys())
+    sums = {k:{'goal_sq':0.,'hist_sq':0.,'goal_abs':0.,'hist_abs':0.,
+               'goal_sum':0.,'hist_sum':0.,'actual_sum':0.,'n':0} for k in keys}
+    all_count = 0
+    matched_count = 0
+    for i, row in enumerate(te):
+        h,a,fo,hx,ax = row
+        fit = _goal19_estimate(train, int(h), int(a), fo, hx, ax)
+        if fit is None: continue
+        all_count += 1
+        mask = ((tr[:,0] == h) & (tr[:,1] == a) &
+                (np.abs(tr[:,2]-fo) <= 0.35) &
+                (np.abs(tr[:,3]-hx) <= 0.40) &
+                (np.abs(tr[:,4]-ax) <= 0.40))
+        n = int(mask.sum())
+        if n < 30: continue
+        matched_count += 1
+        gp = _goal19_probs(fit[0], fit[1], int(h), int(a))
+        for k in keys:
+            ph = (tr_y[k][mask].sum() + 1.)/(n+2.)
+            pg = gp[k]
+            y = te_y[k][i]
+            z=sums[k]
+            z['goal_sq'] += (pg-y)**2
+            z['hist_sq'] += (ph-y)**2
+            z['goal_abs'] += abs(pg-y)
+            z['hist_abs'] += abs(ph-y)
+            z['goal_sum'] += pg
+            z['hist_sum'] += ph
+            z['actual_sum'] += y
+            z['n'] += 1
+    rows=[]
+    for k,z in sums.items():
+        n=z['n']
+        if not n:continue
+        rows.append({'Market':k,'Test matches':n,
+                     'Goal model Brier':round(z['goal_sq']/n,4),
+                     'Historical Brier':round(z['hist_sq']/n,4),
+                     'Better Brier': 'Goal model' if z['goal_sq'] < z['hist_sq'] else ('Historical' if z['hist_sq'] < z['goal_sq'] else 'Tie'),
+                     'Goal forecast %':round(z['goal_sum']/n*100,1),
+                     'Historical forecast %':round(z['hist_sum']/n*100,1),
+                     'Actual %':round(z['actual_sum']/n*100,1)})
+    return {'rows':rows,'train':len(train),'holdout':len(test),
+            'goal_covered':all_count,'both_covered':matched_count,
+            'cutoff':str(cutoff.date())}, None
+
+with st.expander('Run Stage 19C holdout test', expanded=False):
+    st.caption('Fixed, predeclared comparison: xG ±0.40, favourite odds ±0.35, exact HT score, '
+               'minimum 30 historical neighbours; Laplace-smoothed historical estimates. '
+               'Up to 500 evenly spaced later matches are tested. No test outcomes enter either model.')
+    if st.button('Run historical dual-model comparison', key='run19c'):
+        result19c, error19c = _validate19c()
+        if error19c:
+            st.warning(error19c)
+        else:
+            st.write(f"Training matches: {result19c['train']:,} | Later holdout sampled: {result19c['holdout']:,} "
+                     f"| Both models comparable: {result19c['both_covered']:,} "
+                     f"| Holdout begins: {result19c['cutoff']}")
+            st.dataframe(pd.DataFrame(result19c['rows']), use_container_width=True, hide_index=True)
+            st.download_button('Download Stage 19C accuracy CSV',
+                data=pd.DataFrame(result19c['rows']).to_csv(index=False).encode('utf-8-sig'),
+                file_name='stage19c_holdout_accuracy.csv', mime='text/csv')
+            st.caption('Lower Brier is better. Historical method has limited coverage because of exact '
+                       'matching. These are paired comparisons ONLY where both methods have enough '
+                       'data. This test does not establish value, closing-line advantage or ROI. '
+                       'A future independent time period is needed before selecting a winning method.')
