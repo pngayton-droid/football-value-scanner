@@ -2659,3 +2659,110 @@ with st.expander('Run Stage 19I reliability audit', expanded=False):
                        'cannot be established. These are correlated market '
                        'predictions from the same fixtures; do not count them '
                        'as independent bets.')
+
+
+# Stage 19J — explain missing historical match coverage, without changing models.
+@st.cache_data(show_spinner='Diagnosing historical coverage by chronological period…')
+def _stage19j_diagnose(max_per_period=500):
+    pool=_goal19_pool().copy()
+    pool['_rolling_date']=pd.to_datetime(
+        pool['date'] if 'date' in pool else pool['Date'],
+        errors='coerce',dayfirst=True)
+    pool=pool.dropna(subset=['_rolling_date']).sort_values('_rolling_date')
+    if len(pool)<1500:
+        return None,'Insufficient dated historical matches.'
+    dates=np.sort(pool['_rolling_date'].dt.normalize().unique())
+    if len(dates)<100:
+        return None,'Insufficient distinct match dates.'
+    bounds=[dates[min(int(len(dates)*q),len(dates)-1)]
+            for q in [0.50,0.60,0.70,0.80,0.90,0.999999]]
+    summary=[]; detail=[]
+    for fold in range(4):
+        train=pool[pool['_rolling_date']<bounds[fold]].copy()
+        test=pool[(pool['_rolling_date']>=bounds[fold+1])&
+                  (pool['_rolling_date']<bounds[fold+2])].copy()
+        if len(test)>max_per_period:
+            test=test.iloc[np.linspace(0,len(test)-1,max_per_period,dtype=int)].copy()
+        tr=train[['HTHG','HTAG','fav',xg1,xg2]].to_numpy(float)
+        for _,r in test.iterrows():
+            try:
+                h=int(r['HTHG']); a=int(r['HTAG'])
+                fo=float(r['fav']); hx=float(r[xg1]); ax=float(r[xg2])
+                mask=((tr[:,0]==h)&(tr[:,1]==a)&
+                      (np.abs(tr[:,2]-fo)<=0.35)&
+                      (np.abs(tr[:,3]-hx)<=0.40)&
+                      (np.abs(tr[:,4]-ax)<=0.40))
+                n=int(mask.sum())
+                if n<30:
+                    reason='Fewer than 30 comparable earlier matches'
+                else:
+                    fit=_goal19_estimate(train,h,a,fo,hx,ax)
+                    reason='Eligible for both models' if fit is not None else 'Goal-model fit unavailable'
+            except (TypeError,ValueError,KeyError,OverflowError):
+                n=0; reason='Invalid or missing test features'
+                h=r.get('HTHG');a=r.get('HTAG');fo=r.get('fav')
+                hx=r.get(xg1);ax=r.get(xg2)
+            detail.append({
+                'Fold':fold+1,
+                'Match date':str(pd.Timestamp(r['_rolling_date']).date()),
+                'HT home goals':h,'HT away goals':a,
+                'Favourite opening odds':fo,
+                'Home HT xG':hx,'Away HT xG':ax,
+                'Comparable earlier matches':n,
+                'Coverage status':reason,
+                'Odds band': ('<1.50' if pd.notna(fo) and fo<1.5 else
+                              '1.50–1.99' if pd.notna(fo) and fo<2 else
+                              '2.00–2.99' if pd.notna(fo) and fo<3 else
+                              '3.00+' if pd.notna(fo) else 'Missing'),
+                'HT score':f'{h}–{a}'})
+        summary.append({'Fold':fold+1,'Training matches':len(train),
+                        'Test sampled':len(test)})
+    if not detail:return None,'No test fixtures available.'
+    d=pd.DataFrame(detail)
+    f=pd.DataFrame(summary)
+    reasons=(d.groupby(['Fold','Coverage status'],dropna=False)
+             .size().reset_index(name='Matches'))
+    by_odds=(d.groupby(['Odds band','Coverage status'],dropna=False)
+             .size().reset_index(name='Matches'))
+    by_score=(d.groupby(['HT score','Coverage status'],dropna=False)
+              .size().reset_index(name='Matches'))
+    return {'detail':d,'folds':f,'reasons':reasons,
+            'odds':by_odds,'scores':by_score},None
+
+st.subheader('Stage 19J · Why historical fixtures are excluded')
+st.caption('Audits the exact forward-only match criteria used in Stage 19E–19I. '
+           'Explains exclusions by period, halftime score and prematch favourite '
+           'odds. No change to live scanner, model weights or prediction journal.')
+with st.expander('Run Stage 19J coverage diagnostics',expanded=False):
+    cap19j=st.selectbox('Fixtures sampled per rolling period',
+                       [250,500,1000,2000],index=1,key='cap19j')
+    if st.button('Run Stage 19J diagnostics',key='run19j'):
+        with st.spinner('Checking every sampled fixture against earlier history…'):
+            diag19j,error19j=_stage19j_diagnose(cap19j)
+        if error19j:
+            st.warning(error19j)
+        else:
+            st.session_state['diag19j']=diag19j
+    if 'diag19j' in st.session_state:
+        d19j=st.session_state['diag19j']
+        st.markdown('**Reasons for exclusion, by period**')
+        st.dataframe(d19j['reasons'],hide_index=True,use_container_width=True)
+        st.markdown('**Coverage by opening favourite odds**')
+        st.dataframe(d19j['odds'],hide_index=True,use_container_width=True)
+        st.markdown('**Coverage by halftime score**')
+        st.dataframe(d19j['scores'],hide_index=True,use_container_width=True)
+        st.markdown('**Individual fixture diagnostics**')
+        st.dataframe(d19j['detail'],hide_index=True,use_container_width=True)
+        for label,filename,key in [
+            ('Full fixture diagnostics','stage19j_fixture_diagnostics.csv','detail'),
+            ('Exclusion reasons','stage19j_exclusion_reasons.csv','reasons'),
+            ('Coverage by odds','stage19j_odds_coverage.csv','odds'),
+            ('Coverage by halftime score','stage19j_score_coverage.csv','scores')]:
+            st.download_button(
+                'Download '+label+' CSV',
+                d19j[key].to_csv(index=False).encode('utf-8-sig'),
+                file_name=filename,mime='text/csv',key='download19j_'+key)
+        st.info('This is a diagnostic of the paired-comparison eligibility '
+                'rule, not proof that the goal model cannot predict excluded '
+                'fixtures. It cannot measure betting profitability without '
+                'historical executable halftime prices.')
