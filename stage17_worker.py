@@ -266,26 +266,51 @@ def run():
     byid = {str(r['match_id']): r for r in rows}
     created = settled = 0
     live = all_live()
+    diagnostics = {
+        'live_found': len(live), 'recognized_ht': 0, 'already_recorded': 0,
+        'missing_ht_score': 0, 'snapshot_request_error': 0,
+        'missing_ht_xg': 0, 'missing_opening_odds': 0,
+        'no_base_predictions': 0, 'goal_predictions_added': 0,
+        'goal_predictions_withheld': 0, 'new_records': 0,
+    }
     for m in live:
         mid = str(m['id'])
-        if not is_ht(m) or mid in byid:
+        if not is_ht(m):
+            continue
+        diagnostics['recognized_ht'] += 1
+        if mid in byid:
+            diagnostics['already_recorded'] += 1
             continue
         ht = score(m, ht=True)
         if ht is None:
+            diagnostics['missing_ht_score'] += 1
             continue
         try:
             xg = first_half_xg(api('/' + mid + '/live-stats'))
             op = opening(api('/' + mid + '/odds'))
         except (requests.RequestException, ValueError, TypeError) as e:
+            diagnostics['snapshot_request_error'] += 1
             print('Snapshot unavailable', mid, str(e)[:150])
             continue
+        if xg is None:
+            diagnostics['missing_ht_xg'] += 1
+        if op is None:
+            diagnostics['missing_opening_odds'] += 1
         if xg is None or op is None:
             continue
         captured = now()
         preds = predict(history, *ht, op[2], *xg, op[1])
+        if not preds:
+            diagnostics['no_base_predictions'] += 1
         try:
-            preds += prospective_goal_predictions(history, captured, *ht, op[2], *xg)
+            goal_preds = prospective_goal_predictions(history, captured, *ht, op[2], *xg)
+            if goal_preds:
+                diagnostics['goal_predictions_added'] += 1
+            else:
+                diagnostics['goal_predictions_withheld'] += 1
+            preds += goal_preds
         except (ValueError, TypeError, KeyError, OverflowError) as exc:
+            diagnostics['goal_predictions_withheld'] += 1
             print("Stage 20C model withheld", mid, str(exc)[:150])
         if not preds:
             continue
@@ -313,6 +338,7 @@ def run():
         rows.append(record)
         byid[mid] = record
         created += 1
+        diagnostics['new_records'] += 1
     # Check each pending fixture by ID. Never infer full time from live-list absence.
     for row in rows:
         if row.get('status') != 'pending':
@@ -330,6 +356,9 @@ def run():
         except (requests.RequestException, ValueError, TypeError) as e:
             print('Settlement deferred', row['match_id'], str(e)[:150])
     write_rows(rows)
+    print('STAGE 21A COLLECTOR DIAGNOSTICS')
+    for key, value in diagnostics.items():
+        print('  ' + key + ': ' + str(value))
     print('Created', created, 'settled', settled, 'total', len(rows),
           'pending', sum(r['status'] == 'pending' for r in rows))
 
