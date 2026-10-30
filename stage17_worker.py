@@ -266,6 +266,17 @@ def run():
     byid = {str(r['match_id']): r for r in rows}
     created = settled = 0
     live = all_live()
+    # Stage 21B: observe API status strings without changing capture rules.
+    from collections import Counter
+    status_counts = Counter()
+    for match in live:
+        values = status(match)
+        status_counts[tuple(values) if values else ('<missing>',)] += 1
+    print('STAGE 21B LIVE MATCH STATUS AUDIT')
+    print('  live_matches: ' + str(len(live)))
+    for values, count in sorted(status_counts.items(), key=lambda item: (-item[1], item[0])):
+        print('  status_values=' + repr(values) + ' count=' + str(count) +
+              ' recognized_ht=' + str(any(v in HT for v in values)))
     diagnostics = {
         'live_found': len(live), 'recognized_ht': 0, 'already_recorded': 0,
         'missing_ht_score': 0, 'snapshot_request_error': 0,
