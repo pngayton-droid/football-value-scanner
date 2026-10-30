@@ -3136,3 +3136,95 @@ else:
                'the sidebar setting. Model-positive expected value is not '
                'an independently verified edge. Future genuinely captured '
                'quotes and settled results are required.')
+
+
+# Stage 20A — disagreement audit, using actual captured prices only.
+st.subheader('Stage 20A · Model disagreement and value quality')
+st.caption('Research-only review of disagreements at the same captured bookmaker '
+           'quote. Preserves each model probability and expected return, '
+           'rather than treating duplicate predictions as independent bets.')
+if not _stage18_rows:
+    st.info('No genuine priced snapshots available yet. The audit will populate '
+            'when Stage 18 records bookmaker quotes.')
+else:
+    raw20a=pd.DataFrame(_stage18_rows).copy()
+    numeric20a=['Observed odds','Model probability %',
+                'Expected ROI % (model)','Paper P/L per £1']
+    for col20a in numeric20a:
+        raw20a[col20a]=pd.to_numeric(raw20a[col20a],errors='coerce')
+    raw20a=raw20a.dropna(subset=['Observed odds','Model probability %'])
+    quote_keys20a=['Match','Captured UTC','Odds captured UTC','Market',
+                   'Bookmaker','Observed odds']
+    # Explicitly keep model-specific values; never average model predictions.
+    models20a=(raw20a.groupby(quote_keys20a+['Method'],dropna=False,as_index=False)
+               .agg(**{'Model probability %':('Model probability %','first'),
+                        'Model EV %':('Expected ROI % (model)','first'),
+                        'Result':('Result','first'),
+                        'Paper P/L per £1':('Paper P/L per £1','first')}))
+    unique20a=(models20a.groupby(quote_keys20a,dropna=False,as_index=False)
+               .agg(Models=('Method','nunique'),
+                    Min_probability_pct=('Model probability %','min'),
+                    Max_probability_pct=('Model probability %','max'),
+                    Min_EV_pct=('Model EV %','min'),
+                    Max_EV_pct=('Model EV %','max'),
+                    Result=('Result','first'),
+                    Paper_PL_per_1=('Paper P/L per £1','first')))
+    unique20a['Probability spread (pp)']=(
+        unique20a['Max_probability_pct']-unique20a['Min_probability_pct'])
+    unique20a['EV spread (pp)']=(
+        unique20a['Max_EV_pct']-unique20a['Min_EV_pct'])
+    unique20a['Any model positive']=unique20a['Max_EV_pct']>0
+    unique20a['All recorded models positive']=unique20a['Min_EV_pct']>0
+    unique20a['Models disagree on EV sign']=(
+        (unique20a['Min_EV_pct']<=0)&(unique20a['Max_EV_pct']>0))
+    unique20a['Odds band']=pd.cut(
+        unique20a['Observed odds'],
+        bins=[1,2,3,5,10,25,float('inf')],
+        labels=['1.01–2.00','2.01–3.00','3.01–5.00',
+                '5.01–10.00','10.01–25.00','Over 25'],
+        include_lowest=True)
+    unique20a['Review category']=np.select(
+        [unique20a['Models disagree on EV sign'],
+         unique20a['All recorded models positive']],
+        ['Conflicting value estimates','All recorded models positive'],
+        default='No recorded model positive')
+    # This flags only disagreement, never labels a selection safe/profitable.
+    st.metric('Distinct quoted selections',len(unique20a))
+    st.metric('Quotes with disagreement on value',int(
+        unique20a['Models disagree on EV sign'].sum()))
+    st.markdown('**Selection-level disagreement (largest first)**')
+    st.dataframe(unique20a.sort_values('EV spread (pp)',ascending=False)
+                 .round(3),hide_index=True,use_container_width=True)
+    st.markdown('**Model-specific probability and expected value**')
+    st.dataframe(models20a.round(3),hide_index=True,use_container_width=True)
+    by_market20a=(unique20a.groupby('Market',as_index=False)
+                  .agg(Unique_quotes=('Observed odds','size'),
+                       Disagreements=('Models disagree on EV sign','sum'),
+                       Mean_probability_spread_pp=('Probability spread (pp)','mean'),
+                       Mean_EV_spread_pp=('EV spread (pp)','mean')))
+    st.markdown('**Disagreement by market**')
+    st.dataframe(by_market20a.round(3),hide_index=True,
+                 use_container_width=True)
+    by_odds20a=(unique20a.groupby('Odds band',observed=True,as_index=False)
+                .agg(Unique_quotes=('Observed odds','size'),
+                     Disagreements=('Models disagree on EV sign','sum'),
+                     Mean_EV_spread_pp=('EV spread (pp)','mean')))
+    st.markdown('**Disagreement by price band**')
+    st.dataframe(by_odds20a.round(3),hide_index=True,
+                 use_container_width=True)
+    for label20a,data20a,name20a in [
+        ('unique quote audit',unique20a,'stage20a_unique_quotes.csv'),
+        ('model-level probabilities',models20a,'stage20a_model_details.csv'),
+        ('market summary',by_market20a,'stage20a_market_summary.csv'),
+        ('odds-band summary',by_odds20a,'stage20a_odds_bands.csv')]:
+        st.download_button('Download Stage 20A '+label20a+' CSV',
+            data=data20a.to_csv(index=False).encode('utf-8-sig'),
+            file_name=name20a,mime='text/csv',
+            key='stage20a_'+name20a)
+    st.warning('Only two distinct fixtures were recorded in the original '
+               'Stage 20 sample. A positive estimate from all recorded '
+               'models is not independent confirmation: models can share '
+               'training data and errors. The quotes may not be executable, '
+               'and multiple markets within a match are correlated. '
+               'This audit does not establish profitable betting or '
+               'change the live scanner.')
