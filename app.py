@@ -2455,3 +2455,70 @@ with st.expander('Run Stage 19F calibration audit', expanded=False):
                        'are included. The 0–20% bin is too broad to validate '
                        'extreme longshots such as 41.00 odds. No model is '
                        'recalibrated or promoted to live betting by this test.')
+
+
+# Stage 19G — all-market rolling calibration and longshot audit (read-only).
+st.subheader('Stage 19G · All-market calibration and outsider audit')
+st.caption('Audits all 11 halftime markets across the four forward-only holdout periods. '
+           'Does not change live forecasts, betting selections, or staking.')
+with st.expander('Run Stage 19G full audit', expanded=False):
+    if st.button('Run all-market and outsider audit', key='run19g'):
+        previous = st.session_state.get('stage19e_results')
+        if isinstance(previous, dict) and 'calibration' in previous:
+            audit_results, audit_error = previous, None
+        else:
+            audit_results, audit_error = _validate19e()
+        if audit_error:
+            st.warning(audit_error)
+        else:
+            st.session_state['stage19g_data'] = audit_results['calibration'].copy()
+    if 'stage19g_data' in st.session_state:
+        audit = st.session_state['stage19g_data'].copy()
+        if audit.empty:
+            st.warning('No holdout predictions passed the historical matching filters.')
+        else:
+            audit['Squared error'] = (audit['Predicted probability'] - audit['Outcome'])**2
+            overview = (audit.groupby(['Market','Model'],as_index=False)
+                .agg(Observations=('Outcome','size'),
+                     Brier=('Squared error','mean'),
+                     **{'Average predicted %':('Predicted probability',lambda v:100*v.mean()),
+                        'Actual %':('Outcome',lambda v:100*v.mean())}))
+            overview['Gap (pp)'] = overview['Average predicted %']-overview['Actual %']
+            st.markdown('**All 11 markets: out-of-sample accuracy and average bias**')
+            st.dataframe(overview.round(3),hide_index=True,use_container_width=True)
+            st.download_button('Download all-market overview CSV',
+                overview.to_csv(index=False).encode('utf-8-sig'),
+                file_name='stage19g_all_markets.csv',mime='text/csv',key='dl19gall')
+
+            cutoffs=[-0.0000001,.025,.05,.10,.20,.40,.60,.80,1.0000001]
+            names=['0–2.5%','2.5–5%','5–10%','10–20%','20–40%',
+                   '40–60%','60–80%','80–100%']
+            audit['Probability band']=pd.cut(audit['Predicted probability'],
+                bins=cutoffs,labels=names,include_lowest=True)
+            bands=(audit.groupby(['Market','Model','Probability band'],
+                observed=True,as_index=False)
+                .agg(Observations=('Outcome','size'),
+                     **{'Predicted %':('Predicted probability',lambda v:100*v.mean()),
+                        'Actual %':('Outcome',lambda v:100*v.mean())}))
+            bands['Overprediction (pp)']=bands['Predicted %']-bands['Actual %']
+            bands['Small sample (<30)']=bands['Observations']<30
+            st.markdown('**Probability bands (all markets, including outsiders)**')
+            st.dataframe(bands.round(3),hide_index=True,use_container_width=True)
+            st.download_button('Download all-market probability bands CSV',
+                bands.to_csv(index=False).encode('utf-8-sig'),
+                file_name='stage19g_probability_bands.csv',mime='text/csv',key='dl19gbands')
+
+            by_fold=(audit.groupby(['Fold','Market','Model'],as_index=False)
+                .agg(Observations=('Outcome','size'),Brier=('Squared error','mean'),
+                     **{'Predicted %':('Predicted probability',lambda v:100*v.mean()),
+                        'Actual %':('Outcome',lambda v:100*v.mean())}))
+            by_fold['Overprediction (pp)']=by_fold['Predicted %']-by_fold['Actual %']
+            st.markdown('**Four chronological periods: model performance**')
+            st.dataframe(by_fold.round(3),hide_index=True,use_container_width=True)
+            st.download_button('Download rolling-period audit CSV',
+                by_fold.to_csv(index=False).encode('utf-8-sig'),
+                file_name='stage19g_rolling_periods.csv',mime='text/csv',key='dl19gfolds')
+            st.warning('A low-count probability band cannot establish mispricing. '
+                       'The same fixtures contribute to related markets, so rows are '
+                       'correlated. These are prediction tests, not historical odds '
+                       'or evidence of betting profit. No automatic model changes.')
